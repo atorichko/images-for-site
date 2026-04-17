@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin
 
@@ -53,6 +57,66 @@ class CaptchaRequiredError(RuntimeError):
     pass
 
 
+def _get_playwright_cache_dir() -> Path:
+    custom_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if custom_path:
+        return Path(custom_path)
+    return Path.home() / ".cache" / "ms-playwright"
+
+
+def _playwright_browser_exists() -> bool:
+    cache_dir = _get_playwright_cache_dir()
+    patterns = [
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-linux64/chrome",
+        "chromium-*/chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chromium-*/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chromium-*/chrome-win/chrome.exe",
+    ]
+
+    for pattern in patterns:
+        if next(cache_dir.glob(pattern), None) is not None:
+            return True
+
+    return False
+
+
+def ensure_playwright_browser_installed(logger: logging.Logger) -> None:
+    os.environ.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        str(Path.home() / ".cache" / "ms-playwright"),
+    )
+
+    if _playwright_browser_exists():
+        logger.info("Playwright Chromium уже установлен")
+        return
+
+    logger.warning("Playwright Chromium не найден. Пробуем установить автоматически...")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        logger.error("Не удалось установить Chromium для Playwright")
+        logger.error("stdout: %s", result.stdout)
+        logger.error("stderr: %s", result.stderr)
+        raise RuntimeError(
+            "Не удалось установить Chromium для Playwright. "
+            f"stderr: {result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    if not _playwright_browser_exists():
+        raise RuntimeError(
+            "Команда playwright install chromium завершилась без ошибки, "
+            "но Chromium не найден в кэше Playwright."
+        )
+
+    logger.info("Playwright Chromium успешно установлен")
+
+
 class YandexMapsScraper:
     def __init__(
         self,
@@ -83,6 +147,9 @@ class YandexMapsScraper:
             self.status_callback(message)
 
     def start(self) -> None:
+        self._emit_status("Проверка Chromium для Playwright")
+        ensure_playwright_browser_installed(self.logger)
+
         self._emit_status("Запуск браузера Playwright")
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
@@ -541,7 +608,7 @@ class YandexMapsScraper:
 
         if self.headless:
             raise CaptchaRequiredError(
-                "Обнаружена капча в headless-режиме. Отключите headless и повторите."
+                "Обнаружена капча в headless-режиме. На Streamlit Cloud это не решить вручную."
             )
 
         self._emit_status(
@@ -580,3 +647,4 @@ class YandexMapsScraper:
             return any(keyword in page_text for keyword in keywords)
         except PlaywrightError:
             return False
+
