@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import os
 from dataclasses import asdict
 from datetime import datetime
@@ -29,11 +30,12 @@ STATE_RUN_STATS = "run_stats"
 
 
 def is_streamlit_cloud() -> bool:
-    cloud_markers = [
-        "STREAMLIT_SHARING_MODE",
-        "STREAMLIT_CLOUD",
-    ]
-    return any(os.environ.get(marker) for marker in cloud_markers)
+    return (
+        bool(os.environ.get("STREAMLIT_SHARING_MODE"))
+        or bool(os.environ.get("STREAMLIT_CLOUD"))
+        or os.environ.get("HOME") == "/home/appuser"
+        or Path("/mount/src").exists()
+    )
 
 
 def init_state() -> None:

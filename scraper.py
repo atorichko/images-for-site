@@ -133,6 +133,7 @@ class YandexMapsScraper:
         status_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.headless = headless
+        self.effective_headless = headless
         self.logger = logger
         self.status_callback = status_callback
 
@@ -173,8 +174,14 @@ class YandexMapsScraper:
                 ]
             )
 
+        self.effective_headless = self.headless
+
+        if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
+            self.effective_headless = True
+            self._emit_status("DISPLAY не найден. Принудительно включен headless-режим.")
+
         self.browser = self.playwright.chromium.launch(
-            headless=self.headless,
+            headless=self.effective_headless,
             slow_mo=50,
             args=launch_args,
         )
@@ -635,7 +642,7 @@ class YandexMapsScraper:
         if not self._is_captcha_present(page):
             return
 
-        if self.headless:
+        if self.effective_headless:
             raise CaptchaRequiredError(
                 "Обнаружена капча или антибот-проверка. "
                 "В headless/cloud-режиме продолжить автоматически не удалось."
