@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 
 from playwright.sync_api import (
     Browser,
@@ -260,19 +261,21 @@ class YandexMapsScraper:
         limit: int = DEFAULT_MAX_REVIEWS,
     ) -> list[ReviewRecord]:
         page = self._require_page()
-        self._emit_status(f"Открытие карточки: {card.ymaps_card_name or card.ymaps_card_url}")
 
         if not card.ymaps_card_url:
             self.logger.warning("У карточки отсутствует URL, пропуск")
             return []
 
-        self._goto(card.ymaps_card_url)
+        reviews_url = self._build_reviews_url(card.ymaps_card_url)
+        self._emit_status(f"Открытие страницы отзывов: {reviews_url}")
+
+        self._goto(reviews_url)
         self._maybe_handle_captcha(page)
-        self._wait_for_card(page)
+        self._wait_for_reviews_page(page)
 
         if not self._open_reviews_section(page):
             self._emit_status(
-                f"Отзывов нет или раздел отзывов не найден: {card.ymaps_card_name or card.ymaps_card_url}"
+                f"Отзывы не найдены на странице: {card.ymaps_card_name or card.ymaps_card_url}"
             )
             return []
 
@@ -281,7 +284,7 @@ class YandexMapsScraper:
         collected: dict[tuple[str, str, str], ReviewRecord] = {}
         stagnant_iterations = 0
 
-        while len(collected) < limit and stagnant_iterations < MAX_SCROLL_STAGNATION:
+        while len(collected) < limit and stagnant_iterations < max(MAX_SCROLL_STAGNATION, 12):
             self._maybe_handle_captcha(page)
             self._expand_visible_review_texts(page)
 
@@ -304,9 +307,9 @@ class YandexMapsScraper:
             scrolled = self._scroll_reviews(page)
             sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
 
-            if after_count == before_count:
+            if after_count == before_count and not scrolled:
                 stagnant_iterations += 1
-            elif not scrolled:
+            elif after_count == before_count:
                 stagnant_iterations += 1
             else:
                 stagnant_iterations = 0
@@ -337,6 +340,63 @@ class YandexMapsScraper:
             retry_exceptions=(PlaywrightTimeoutError, PlaywrightError),
         )
 
+    def _extract_card_url(self, page: Page) -> str:
+        normalized_from_current = self._normalize_org_url(page.url)
+        if normalized_from_current:
+            return normalized_from_current
+
+        locator = page.locator('a[href*="/org/"]')
+        try:
+            count = min(locator.count(), 10)
+        except PlaywrightError:
+            count = 0
+
+        for idx in range(count):
+            item = locator.nth(idx)
+            try:
+                href = item.get_attribute("href")
+                if not href:
+                    continue
+                absolute_url = urljoin(BASE_URL, href)
+                normalized = self._normalize_org_url(absolute_url)
+                if normalized:
+                    return normalized
+            except PlaywrightError:
+                continue
+
+        return self._normalize_fallback_url(page.url)
+
+    def _normalize_fallback_url(self, url: str) -> str:
+        parsed = urlsplit(url)
+        path = parsed.path or "/"
+        return f"https://yandex.ru{path}"
+
+    def _normalize_org_url(self, url: str) -> str:
+        parsed = urlsplit(url)
+        path = parsed.path or ""
+
+        match = re.search(r"/maps/org/([^/]+)/(\d+)(?:/reviews/)?/?", path)
+        if not match:
+            match = re.search(r"/org/([^/]+)/(\d+)(?:/reviews/)?/?", path)
+
+        if not match:
+            return ""
+
+        slug = match.group(1)
+        org_id = match.group(2)
+
+        return f"https://yandex.ru/maps/org/{slug}/{org_id}/"
+
+    def _build_reviews_url(self, card_url: str) -> str:
+        normalized = self._normalize_org_url(card_url)
+        if not normalized:
+            normalized = self._normalize_fallback_url(card_url)
+
+        if not normalized.endswith("/"):
+            normalized += "/"
+
+        return f"{normalized}reviews/"
+
     def _wait_for_results_or_card(self, page: Page, timeout_ms: int = SEARCH_TIMEOUT_MS) -> None:
         end_time = time.time() + timeout_ms / 1000
 
@@ -357,6 +417,18 @@ class YandexMapsScraper:
             time.sleep(0.3)
 
         self.logger.warning("Истекло ожидание открытия карточки")
+
+    def _wait_for_reviews_page(self, page: Page, timeout_ms: int = CARD_TIMEOUT_MS) -> None:
+        end_time = time.time() + timeout_ms / 1000
+
+        while time.time() < end_time:
+            if "/reviews" in page.url:
+                return
+            if self._find_first_visible(page, REVIEW_ITEM_SELECTORS, timeout_ms=0) is not None:
+                return
+            time.sleep(0.3)
+
+        self.logger.warning("Истекло ожидание страницы отзывов")
 
     def _has_open_card(self, page: Page) -> bool:
         title = self._extract_text_from_selectors(page, CARD_TITLE_SELECTORS)
@@ -388,33 +460,11 @@ class YandexMapsScraper:
 
         return False
 
-    def _extract_card_url(self, page: Page) -> str:
-        current_url = page.url
-        if "/org/" in current_url:
-            return current_url
-
-        locator = page.locator('a[href*="/org/"]')
-        try:
-            count = min(locator.count(), 5)
-        except PlaywrightError:
-            count = 0
-
-        for idx in range(count):
-            item = locator.nth(idx)
-            try:
-                href = item.get_attribute("href")
-                if href and "/org/" in href:
-                    return urljoin(BASE_URL, href)
-            except PlaywrightError:
-                continue
-
-        return current_url
-
     def _open_reviews_section(self, page: Page) -> bool:
         if self._find_first_visible(page, NO_REVIEWS_SELECTORS, timeout_ms=1_000) is not None:
             return False
 
-        if self._find_first_visible(page, REVIEW_ITEM_SELECTORS, timeout_ms=1_000) is not None:
+        if self._find_first_visible(page, REVIEW_ITEM_SELECTORS, timeout_ms=1_500) is not None:
             return True
 
         for selector in OPEN_REVIEWS_SELECTORS:
@@ -479,7 +529,7 @@ class YandexMapsScraper:
 
         items = page.locator(selector)
         try:
-            count = min(items.count(), 150)
+            count = min(items.count(), 300)
         except PlaywrightError:
             return []
 
@@ -505,7 +555,7 @@ class YandexMapsScraper:
                     residential_complex_input=card.residential_complex_input,
                     ymaps_card_name=card.ymaps_card_name,
                     ymaps_card_address=card.ymaps_card_address,
-                    ymaps_card_url=card.ymaps_card_url,
+                    ymaps_card_url=self._normalize_org_url(card.ymaps_card_url) or card.ymaps_card_url,
                     review_date=review_date,
                     user_name=user_name,
                     review_text=review_text,
@@ -518,7 +568,7 @@ class YandexMapsScraper:
         for selector in REVIEW_EXPAND_BUTTON_SELECTORS:
             locator = page.locator(selector)
             try:
-                count = min(locator.count(), 10)
+                count = min(locator.count(), 30)
             except PlaywrightError:
                 continue
 
@@ -536,22 +586,72 @@ class YandexMapsScraper:
 
         if container is not None:
             try:
-                before = container.evaluate("(el) => el.scrollTop")
+                before_top = container.evaluate("(el) => el.scrollTop")
+                before_height = container.evaluate("(el) => el.scrollHeight")
+
                 container.evaluate(
-                    "(el) => { el.scrollBy(0, Math.max(900, el.clientHeight * 0.9)); }"
+                    """
+                    (el) => {
+                        const step = Math.max(1200, el.clientHeight * 1.25);
+                        el.scrollBy(0, step);
+                    }
+                    """
                 )
-                time.sleep(0.5)
-                after = container.evaluate("(el) => el.scrollTop")
-                return bool(after > before)
+                time.sleep(0.8)
+
+                after_top = container.evaluate("(el) => el.scrollTop")
+                after_height = container.evaluate("(el) => el.scrollHeight")
+
+                if after_top > before_top or after_height > before_height:
+                    return True
             except PlaywrightError:
                 pass
 
         try:
-            before = page.evaluate("window.scrollY")
-            page.mouse.wheel(0, 1500)
-            time.sleep(0.5)
-            after = page.evaluate("window.scrollY")
-            return bool(after > before)
+            before = page.evaluate(
+                """
+                () => {
+                    const el = document.scrollingElement || document.documentElement || document.body;
+                    return {
+                        scrollTop: el ? el.scrollTop : window.scrollY,
+                        scrollHeight: el ? el.scrollHeight : 0
+                    };
+                }
+                """
+            )
+
+            page.evaluate(
+                """
+                () => {
+                    const el = document.scrollingElement || document.documentElement || document.body;
+                    const step = Math.max(1400, window.innerHeight * 1.5);
+
+                    window.scrollBy(0, step);
+
+                    if (el) {
+                        el.scrollTop = el.scrollTop + step;
+                    }
+                }
+                """
+            )
+            time.sleep(0.8)
+
+            after = page.evaluate(
+                """
+                () => {
+                    const el = document.scrollingElement || document.documentElement || document.body;
+                    return {
+                        scrollTop: el ? el.scrollTop : window.scrollY,
+                        scrollHeight: el ? el.scrollHeight : 0
+                    };
+                }
+                """
+            )
+
+            return bool(
+                after["scrollTop"] > before["scrollTop"]
+                or after["scrollHeight"] > before["scrollHeight"]
+            )
         except PlaywrightError:
             return False
 
@@ -621,7 +721,7 @@ class YandexMapsScraper:
         for selector in selectors:
             locator = root.locator(selector)
             try:
-                count = min(locator.count(), 10)
+                count = min(locator.count(), 15)
             except PlaywrightError:
                 continue
 
