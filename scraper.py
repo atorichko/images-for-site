@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote, urljoin
 
@@ -20,7 +21,9 @@ from config import (
     BASE_URL,
     BROWSER_HEIGHT,
     BROWSER_WIDTH,
+    CAPTCHA_POLL_INTERVAL_SECONDS,
     CAPTCHA_SELECTORS,
+    CAPTCHA_WAIT_TIMEOUT_SECONDS,
     CARD_ADDRESS_SELECTORS,
     CARD_TIMEOUT_MS,
     CARD_TITLE_SELECTORS,
@@ -46,10 +49,21 @@ from models import CardMatch, ReviewRecord
 from utils import normalize_whitespace, retry_call, sleep_random
 
 
+class CaptchaRequiredError(RuntimeError):
+    pass
+
+
 class YandexMapsScraper:
-    def __init__(self, headless: bool, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        headless: bool,
+        logger: logging.Logger,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self.headless = headless
         self.logger = logger
+        self.status_callback = status_callback
 
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
@@ -63,8 +77,13 @@ class YandexMapsScraper:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.close()
 
+    def _emit_status(self, message: str) -> None:
+        self.logger.info(message)
+        if self.status_callback is not None:
+            self.status_callback(message)
+
     def start(self) -> None:
-        self.logger.info("Запуск браузера Playwright")
+        self._emit_status("Запуск браузера Playwright")
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
             headless=self.headless,
@@ -93,7 +112,7 @@ class YandexMapsScraper:
         search_query: str,
     ) -> CardMatch | None:
         page = self._require_page()
-        self.logger.info("Поиск карточки: input='%s', query='%s'", residential_complex_input, search_query)
+        self._emit_status(f"Поиск карточки: {search_query}")
 
         search_url = f"{BASE_URL}?text={quote(search_query)}"
         self._goto(search_url)
@@ -119,6 +138,8 @@ class YandexMapsScraper:
             self.logger.warning("Карточка не распознана после поиска: %s", search_query)
             return None
 
+        self._emit_status(f"Карточка найдена: {title or card_url}")
+
         return CardMatch(
             residential_complex_input=residential_complex_input,
             search_query=search_query,
@@ -134,7 +155,7 @@ class YandexMapsScraper:
         limit: int = DEFAULT_MAX_REVIEWS,
     ) -> list[ReviewRecord]:
         page = self._require_page()
-        self.logger.info("Сбор отзывов для карточки: %s", card.ymaps_card_url)
+        self._emit_status(f"Открытие карточки: {card.ymaps_card_name}")
 
         if not card.ymaps_card_url:
             self.logger.warning("У карточки отсутствует URL, пропуск")
@@ -145,7 +166,7 @@ class YandexMapsScraper:
         self._wait_for_card(page)
 
         if not self._open_reviews_section(page):
-            self.logger.info("Раздел отзывов не найден или отзывов нет: %s", card.ymaps_card_name)
+            self._emit_status(f"Отзывов нет или раздел отзывов не найден: {card.ymaps_card_name}")
             return []
 
         self._sort_reviews_by_newest(page)
@@ -170,11 +191,8 @@ class YandexMapsScraper:
                     collected[key] = review
 
             after_count = len(collected)
-            self.logger.info(
-                "Промежуточно собрано %s/%s отзывов по карточке '%s'",
-                after_count,
-                limit,
-                card.ymaps_card_name,
+            self._emit_status(
+                f"Собрано {after_count}/{limit} отзывов по '{card.ymaps_card_name}'"
             )
 
             if after_count >= limit:
@@ -191,10 +209,8 @@ class YandexMapsScraper:
                 stagnant_iterations = 0
 
         result = list(collected.values())[:limit]
-        self.logger.info(
-            "Сбор завершен: %s отзывов по карточке '%s'",
-            len(result),
-            card.ymaps_card_name,
+        self._emit_status(
+            f"Сбор завершен: {len(result)} отзывов по '{card.ymaps_card_name}'"
         )
         return result
 
@@ -247,7 +263,7 @@ class YandexMapsScraper:
         return self._find_first_visible(page, RESULT_SELECTORS, timeout_ms=0) is not None
 
     def _open_first_search_result(self, page: Page) -> bool:
-        self.logger.info("Пробуем открыть первый результат поиска")
+        self._emit_status("Пробуем открыть первый результат поиска")
 
         for selector in RESULT_SELECTORS:
             locator = page.locator(selector)
@@ -323,7 +339,7 @@ class YandexMapsScraper:
         return self._find_first_visible(page, REVIEW_ITEM_SELECTORS, timeout_ms=3_000) is not None
 
     def _sort_reviews_by_newest(self, page: Page) -> None:
-        self.logger.info("Пробуем включить сортировку 'Сначала новые'")
+        self._emit_status("Пробуем включить сортировку 'Сначала новые'")
 
         newest_visible = self._find_first_visible(page, NEWEST_OPTION_SELECTORS, timeout_ms=1_000)
         if newest_visible is not None:
@@ -523,19 +539,25 @@ class YandexMapsScraper:
         if not self._is_captcha_present(page):
             return
 
-        print(
-            "\n[!] Похоже, Яндекс Карты показали капчу или антибот-проверку.\n"
-            "Решите ее вручную в окне браузера, затем вернитесь в консоль."
+        if self.headless:
+            raise CaptchaRequiredError(
+                "Обнаружена капча в headless-режиме. Отключите headless и повторите."
+            )
+
+        self._emit_status(
+            "Обнаружена капча. Решите ее в открывшемся окне браузера. Ожидание..."
         )
-        input("Нажмите Enter после решения капчи... ")
 
-        for _ in range(60):
+        deadline = time.time() + CAPTCHA_WAIT_TIMEOUT_SECONDS
+        while time.time() < deadline:
             if not self._is_captcha_present(page):
-                self.logger.info("Капча, вероятно, решена. Продолжаем.")
+                self._emit_status("Капча, вероятно, решена. Продолжаем.")
                 return
-            time.sleep(1)
+            time.sleep(CAPTCHA_POLL_INTERVAL_SECONDS)
 
-        self.logger.warning("Капча может по-прежнему быть активна.")
+        raise CaptchaRequiredError(
+            "Не удалось дождаться решения капчи. Попробуйте снова."
+        )
 
     def _is_captcha_present(self, page: Page) -> bool:
         for selector in CAPTCHA_SELECTORS:

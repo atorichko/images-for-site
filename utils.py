@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import csv
+import io
 import logging
 import random
 import time
 from dataclasses import asdict
-from pathlib import Path
-from typing import Callable, Iterable, TypeVar
+from typing import BinaryIO, Callable, Iterable, TypeVar
 
 from models import ReviewRecord
 
@@ -40,47 +40,6 @@ def normalize_whitespace(value: str | None) -> str:
     return " ".join(value.replace("\xa0", " ").split()).strip()
 
 
-def prompt_choice(prompt: str, choices: set[str]) -> str:
-    while True:
-        value = input(f"{prompt}: ").strip()
-        if value in choices:
-            return value
-        print(f"Некорректный ввод. Допустимые значения: {', '.join(sorted(choices))}")
-
-
-def ask_yes_no(prompt: str) -> bool:
-    while True:
-        value = input(prompt).strip().lower()
-        if value in {"y", "yes", "д", "да"}:
-            return True
-        if value in {"n", "no", "н", "нет"}:
-            return False
-        print("Введите y/n.")
-
-
-def prompt_multiline_queries() -> list[str]:
-    print(
-        "Введите список ЖК построчно. "
-        "Чтобы завершить ввод, отправьте пустую строку два раза подряд."
-    )
-
-    lines: list[str] = []
-    empty_streak = 0
-
-    while True:
-        line = input().strip()
-        if not line:
-            empty_streak += 1
-            if empty_streak >= 2:
-                break
-            continue
-
-        empty_streak = 0
-        lines.append(line)
-
-    return unique_non_empty(lines)
-
-
 def unique_non_empty(items: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -93,14 +52,6 @@ def unique_non_empty(items: Iterable[str]) -> list[str]:
         result.append(value)
 
     return result
-
-
-def load_queries_from_file(path: Path) -> list[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Файл не найден: {path}")
-
-    text = path.read_text(encoding="utf-8")
-    return unique_non_empty(text.splitlines())
 
 
 def retry_call(
@@ -138,9 +89,8 @@ def retry_call(
     raise last_exc
 
 
-def write_reviews_csv(records: list[ReviewRecord], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
+def reviews_to_csv_bytes(records: list[ReviewRecord]) -> bytes:
+    buffer = io.StringIO()
     fieldnames = [
         "residential_complex_input",
         "ymaps_card_name",
@@ -151,9 +101,24 @@ def write_reviews_csv(records: list[ReviewRecord], output_path: Path) -> None:
         "review_text",
     ]
 
-    with output_path.open("w", encoding="utf-8-sig", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=";")
-        writer.writeheader()
-        for record in records:
-            writer.writerow(asdict(record))
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, delimiter=";")
+    writer.writeheader()
 
+    for record in records:
+        writer.writerow(asdict(record))
+
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def decode_uploaded_text_file(uploaded_file: BinaryIO | None) -> str:
+    if uploaded_file is None:
+        return ""
+
+    raw = uploaded_file.read()
+    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return raw.decode("utf-8", errors="ignore")
