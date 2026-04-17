@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -64,9 +65,8 @@ def _get_playwright_cache_dir() -> Path:
     return Path.home() / ".cache" / "ms-playwright"
 
 
-def _playwright_browser_exists() -> bool:
-    cache_dir = _get_playwright_cache_dir()
-    patterns = [
+def _browser_glob_patterns() -> list[str]:
+    return [
         "chromium-*/chrome-linux/chrome",
         "chromium-*/chrome-linux64/chrome",
         "chromium-*/chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -74,7 +74,14 @@ def _playwright_browser_exists() -> bool:
         "chromium-*/chrome-win/chrome.exe",
     ]
 
-    for pattern in patterns:
+
+def _playwright_browser_exists() -> bool:
+    cache_dir = _get_playwright_cache_dir()
+
+    if not cache_dir.exists():
+        return False
+
+    for pattern in _browser_glob_patterns():
         if next(cache_dir.glob(pattern), None) is not None:
             return True
 
@@ -91,7 +98,7 @@ def ensure_playwright_browser_installed(logger: logging.Logger) -> None:
         logger.info("Playwright Chromium уже установлен")
         return
 
-    logger.warning("Playwright Chromium не найден. Пробуем установить автоматически...")
+    logger.warning("Playwright Chromium не найден. Запускаем playwright install chromium ...")
 
     result = subprocess.run(
         [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -100,7 +107,7 @@ def ensure_playwright_browser_installed(logger: logging.Logger) -> None:
     )
 
     if result.returncode != 0:
-        logger.error("Не удалось установить Chromium для Playwright")
+        logger.error("Установка Chromium завершилась с ошибкой")
         logger.error("stdout: %s", result.stdout)
         logger.error("stderr: %s", result.stderr)
         raise RuntimeError(
@@ -110,8 +117,8 @@ def ensure_playwright_browser_installed(logger: logging.Logger) -> None:
 
     if not _playwright_browser_exists():
         raise RuntimeError(
-            "Команда playwright install chromium завершилась без ошибки, "
-            "но Chromium не найден в кэше Playwright."
+            "playwright install chromium завершился без ошибки, "
+            "но исполняемый файл Chromium не найден."
         )
 
     logger.info("Playwright Chromium успешно установлен")
@@ -147,18 +154,39 @@ class YandexMapsScraper:
             self.status_callback(message)
 
     def start(self) -> None:
-        self._emit_status("Проверка Chromium для Playwright")
+        self._emit_status("Проверка браузера Chromium для Playwright")
         ensure_playwright_browser_installed(self.logger)
 
-        self._emit_status("Запуск браузера Playwright")
+        self._emit_status("Запуск Playwright")
         self.playwright = sync_playwright().start()
+
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+        ]
+
+        if platform.system().lower() == "linux":
+            launch_args.extend(
+                [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                ]
+            )
+
         self.browser = self.playwright.chromium.launch(
             headless=self.headless,
             slow_mo=50,
+            args=launch_args,
         )
+
         self.context = self.browser.new_context(
             locale="ru-RU",
             viewport={"width": BROWSER_WIDTH, "height": BROWSER_HEIGHT},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
         )
         self.page = self.context.new_page()
         self.page.set_default_timeout(DEFAULT_TIMEOUT_MS)
@@ -191,7 +219,10 @@ class YandexMapsScraper:
         if not self._has_open_card(page):
             clicked = self._open_first_search_result(page)
             if not clicked:
-                self.logger.warning("Не удалось открыть карточку из результатов поиска: %s", search_query)
+                self.logger.warning(
+                    "Не удалось открыть карточку из результатов поиска: %s",
+                    search_query,
+                )
                 return None
 
         self._maybe_handle_captcha(page)
@@ -222,7 +253,7 @@ class YandexMapsScraper:
         limit: int = DEFAULT_MAX_REVIEWS,
     ) -> list[ReviewRecord]:
         page = self._require_page()
-        self._emit_status(f"Открытие карточки: {card.ymaps_card_name}")
+        self._emit_status(f"Открытие карточки: {card.ymaps_card_name or card.ymaps_card_url}")
 
         if not card.ymaps_card_url:
             self.logger.warning("У карточки отсутствует URL, пропуск")
@@ -233,7 +264,9 @@ class YandexMapsScraper:
         self._wait_for_card(page)
 
         if not self._open_reviews_section(page):
-            self._emit_status(f"Отзывов нет или раздел отзывов не найден: {card.ymaps_card_name}")
+            self._emit_status(
+                f"Отзывов нет или раздел отзывов не найден: {card.ymaps_card_name or card.ymaps_card_url}"
+            )
             return []
 
         self._sort_reviews_by_newest(page)
@@ -249,17 +282,13 @@ class YandexMapsScraper:
             batch = self._extract_reviews_from_dom(page, card)
 
             for review in batch:
-                key = (
-                    review.review_date,
-                    review.user_name,
-                    review.review_text,
-                )
+                key = (review.review_date, review.user_name, review.review_text)
                 if key not in collected:
                     collected[key] = review
 
             after_count = len(collected)
             self._emit_status(
-                f"Собрано {after_count}/{limit} отзывов по '{card.ymaps_card_name}'"
+                f"Собрано {after_count}/{limit} отзывов по '{card.ymaps_card_name or card.ymaps_card_url}'"
             )
 
             if after_count >= limit:
@@ -268,16 +297,16 @@ class YandexMapsScraper:
             scrolled = self._scroll_reviews(page)
             sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
 
-            if not scrolled and after_count == before_count:
+            if after_count == before_count:
                 stagnant_iterations += 1
-            elif after_count == before_count:
+            elif not scrolled:
                 stagnant_iterations += 1
             else:
                 stagnant_iterations = 0
 
         result = list(collected.values())[:limit]
         self._emit_status(
-            f"Сбор завершен: {len(result)} отзывов по '{card.ymaps_card_name}'"
+            f"Сбор завершен: {len(result)} отзывов по '{card.ymaps_card_name or card.ymaps_card_url}'"
         )
         return result
 
@@ -608,12 +637,11 @@ class YandexMapsScraper:
 
         if self.headless:
             raise CaptchaRequiredError(
-                "Обнаружена капча в headless-режиме. На Streamlit Cloud это не решить вручную."
+                "Обнаружена капча или антибот-проверка. "
+                "В headless/cloud-режиме продолжить автоматически не удалось."
             )
 
-        self._emit_status(
-            "Обнаружена капча. Решите ее в открывшемся окне браузера. Ожидание..."
-        )
+        self._emit_status("Обнаружена капча. Решите ее в окне браузера. Ожидание...")
 
         deadline = time.time() + CAPTCHA_WAIT_TIMEOUT_SECONDS
         while time.time() < deadline:
@@ -623,7 +651,7 @@ class YandexMapsScraper:
             time.sleep(CAPTCHA_POLL_INTERVAL_SECONDS)
 
         raise CaptchaRequiredError(
-            "Не удалось дождаться решения капчи. Попробуйте снова."
+            "Не удалось дождаться решения капчи. Попробуйте повторить действие."
         )
 
     def _is_captcha_present(self, page: Page) -> bool:
@@ -647,4 +675,3 @@ class YandexMapsScraper:
             return any(keyword in page_text for keyword in keywords)
         except PlaywrightError:
             return False
-

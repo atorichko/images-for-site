@@ -16,3 +16,5 @@ libatspi2.0-0
 libxshmfence1
 libgtk-3-0
 libglib2.0-0
+fonts-liberation
+ca-certificates
