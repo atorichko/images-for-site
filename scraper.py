@@ -262,6 +262,8 @@ class YandexMapsScraper:
     ) -> list[ReviewRecord]:
         page = self._require_page()
 
+        limit = max(1, min(limit, DEFAULT_MAX_REVIEWS))
+
         if not card.ymaps_card_url:
             self.logger.warning("У карточки отсутствует URL, пропуск")
             return []
@@ -284,7 +286,7 @@ class YandexMapsScraper:
         collected: dict[tuple[str, str, str], ReviewRecord] = {}
         stagnant_iterations = 0
 
-        while len(collected) < limit and stagnant_iterations < max(MAX_SCROLL_STAGNATION, 12):
+        while len(collected) < limit and stagnant_iterations < MAX_SCROLL_STAGNATION:
             self._maybe_handle_captcha(page)
             self._expand_visible_review_texts(page)
 
@@ -529,7 +531,7 @@ class YandexMapsScraper:
 
         items = page.locator(selector)
         try:
-            count = min(items.count(), 300)
+            count = min(items.count(), 200)
         except PlaywrightError:
             return []
 
@@ -568,7 +570,7 @@ class YandexMapsScraper:
         for selector in REVIEW_EXPAND_BUTTON_SELECTORS:
             locator = page.locator(selector)
             try:
-                count = min(locator.count(), 30)
+                count = min(locator.count(), 20)
             except PlaywrightError:
                 continue
 
@@ -592,12 +594,12 @@ class YandexMapsScraper:
                 container.evaluate(
                     """
                     (el) => {
-                        const step = Math.max(1200, el.clientHeight * 1.25);
+                        const step = Math.max(1000, el.clientHeight * 1.1);
                         el.scrollBy(0, step);
                     }
                     """
                 )
-                time.sleep(0.8)
+                time.sleep(0.7)
 
                 after_top = container.evaluate("(el) => el.scrollTop")
                 after_height = container.evaluate("(el) => el.scrollHeight")
@@ -624,7 +626,7 @@ class YandexMapsScraper:
                 """
                 () => {
                     const el = document.scrollingElement || document.documentElement || document.body;
-                    const step = Math.max(1400, window.innerHeight * 1.5);
+                    const step = Math.max(1200, window.innerHeight * 1.3);
 
                     window.scrollBy(0, step);
 
@@ -634,7 +636,7 @@ class YandexMapsScraper:
                 }
                 """
             )
-            time.sleep(0.8)
+            time.sleep(0.7)
 
             after = page.evaluate(
                 """

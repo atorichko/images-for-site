@@ -463,9 +463,11 @@ def render_sidebar() -> tuple[bool, int, str]:
         review_limit = st.number_input(
             "Лимит отзывов на карточку",
             min_value=1,
-            max_value=300,
+            max_value=50,
             value=DEFAULT_MAX_REVIEWS,
             step=1,
+            help="Для снижения риска капчи лимит жестко ограничен 50 отзывами.",
+
         )
 
         log_level = st.selectbox(
@@ -482,6 +484,8 @@ def render_sidebar() -> tuple[bool, int, str]:
                 **Режим запуска:** Streamlit Cloud  
                 **Headless:** принудительно включен  
                 **Риск:** капча/антибот Яндекса
+                **Рекомендация:**  
+                Для снижения риска капчи сбор ограничен последними 50 отзывами.
                 """
             )
         else:
