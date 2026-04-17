@@ -22,22 +22,47 @@ st.set_page_config(
     layout="wide",
 )
 
+STATE_SEARCH_ITEMS = "search_items"
+STATE_REVIEW_ROWS = "review_rows"
+STATE_RUN_STATS = "run_stats"
+
 
 def init_state() -> None:
     defaults: dict[str, Any] = {
-        "items": [],
-        "reviews": [],
-        "stats": None,
+        STATE_SEARCH_ITEMS: [],
+        STATE_REVIEW_ROWS: [],
+        STATE_RUN_STATS: None,
     }
+
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
+def get_search_items() -> list[dict[str, Any]]:
+    return st.session_state[STATE_SEARCH_ITEMS]
+
+
+def set_search_items(items: list[dict[str, Any]]) -> None:
+    st.session_state[STATE_SEARCH_ITEMS] = items
+
+
+def parse_queries(text_input: str, uploaded_text: str) -> list[str]:
+    raw_lines: list[str] = []
+
+    if text_input.strip():
+        raw_lines.extend(text_input.splitlines())
+
+    if uploaded_text.strip():
+        raw_lines.extend(uploaded_text.splitlines())
+
+    return unique_non_empty(raw_lines)
+
+
 def load_queries_to_state(queries: list[str]) -> None:
-    st.session_state.items = [
+    search_items = [
         {
-            "id": f"item_{idx}",
+            "id": f"rc_{idx}",
             "original_query": query,
             "search_query": query,
             "candidate": None,
@@ -46,24 +71,31 @@ def load_queries_to_state(queries: list[str]) -> None:
         }
         for idx, query in enumerate(queries, start=1)
     ]
-    st.session_state.reviews = []
-    st.session_state.stats = None
 
-    for item in st.session_state.items:
+    set_search_items(search_items)
+    st.session_state[STATE_REVIEW_ROWS] = []
+    st.session_state[STATE_RUN_STATS] = None
+
+    for item in search_items:
         state_key = f"search_query_{item['id']}"
         st.session_state[state_key] = item["search_query"]
 
 
-def parse_queries(text_input: str, uploaded_text: str) -> list[str]:
-    combined: list[str] = []
+def clear_state() -> None:
+    search_items = get_search_items()
 
-    if text_input.strip():
-        combined.extend(text_input.splitlines())
+    for item in search_items:
+        key = f"search_query_{item['id']}"
+        if key in st.session_state:
+            del st.session_state[key]
 
-    if uploaded_text.strip():
-        combined.extend(uploaded_text.splitlines())
+    st.session_state[STATE_SEARCH_ITEMS] = []
+    st.session_state[STATE_REVIEW_ROWS] = []
+    st.session_state[STATE_RUN_STATS] = None
 
-    return unique_non_empty(combined)
+
+def build_logger(log_level: str):
+    return setup_logging(log_level)
 
 
 def card_from_dict(data: dict[str, Any]) -> CardMatch:
@@ -88,29 +120,36 @@ def review_from_dict(data: dict[str, Any]) -> ReviewRecord:
     )
 
 
-def build_logger(log_level: str):
-    return setup_logging(log_level)
+def get_confirmed_items() -> list[dict[str, Any]]:
+    return [
+        item
+        for item in get_search_items()
+        if item["status"] == "confirmed" and item["candidate"] is not None
+    ]
 
 
 def search_single_item(item_index: int, headless: bool, log_level: str) -> None:
-    item = st.session_state.items[item_index]
+    search_items = get_search_items()
+    item = search_items[item_index]
     item_id = item["id"]
-    query_key = f"search_query_{item_id}"
-    item["search_query"] = st.session_state.get(query_key, item["search_query"]).strip()
+    query_state_key = f"search_query_{item_id}"
+
+    item["search_query"] = st.session_state.get(query_state_key, item["search_query"]).strip()
 
     if not item["search_query"]:
         item["last_error"] = "Поисковый запрос не может быть пустым."
-        st.session_state.items[item_index] = item
+        search_items[item_index] = item
+        set_search_items(search_items)
         return
 
     logger = build_logger(log_level)
-    status_box = st.empty()
+    status_placeholder = st.empty()
     messages: list[str] = []
 
     def status_callback(message: str) -> None:
         messages.append(message)
         rendered = "\n".join(f"- {msg}" for msg in messages[-8:])
-        status_box.info(rendered)
+        status_placeholder.info(rendered)
 
     try:
         with YandexMapsScraper(
@@ -127,52 +166,49 @@ def search_single_item(item_index: int, headless: bool, log_level: str) -> None:
             item["candidate"] = None
             item["status"] = "pending"
             item["last_error"] = "Карточка не найдена или не удалось извлечь данные."
-            status_box.warning(item["last_error"])
+            status_placeholder.warning(item["last_error"])
         else:
             item["candidate"] = asdict(candidate)
             item["status"] = "pending"
             item["last_error"] = ""
-            status_box.success("Поиск завершен. Проверьте найденную карточку ниже.")
+            status_placeholder.success("Поиск завершен. Проверьте найденную карточку.")
 
     except CaptchaRequiredError as exc:
         item["last_error"] = str(exc)
-        status_box.error(str(exc))
+        status_placeholder.error(str(exc))
     except Exception as exc:
         logger.exception("Ошибка поиска карточки")
         item["last_error"] = str(exc)
-        status_box.error(f"Ошибка поиска: {exc}")
+        status_placeholder.error(f"Ошибка поиска: {exc}")
 
-    st.session_state.items[item_index] = item
+    search_items[item_index] = item
+    set_search_items(search_items)
 
 
-def search_all_pending(headless: bool, log_level: str) -> None:
-    items = st.session_state.items
-    total = len(items)
+def search_all_non_excluded(headless: bool, log_level: str) -> None:
+    search_items = get_search_items()
+    total = len(search_items)
 
     if total == 0:
         return
 
     progress = st.progress(0, text="Поиск карточек...")
-    status_text = st.empty()
+    progress_text = st.empty()
 
-    for idx, item in enumerate(items):
+    for idx, item in enumerate(search_items):
         if item["status"] == "excluded":
             progress.progress((idx + 1) / total, text="Поиск карточек...")
             continue
 
-        status_text.write(f"**Поиск [{idx + 1}/{total}]**: {item['original_query']}")
+        progress_text.write(f"**Поиск [{idx + 1}/{total}]**: {item['original_query']}")
         search_single_item(idx, headless=headless, log_level=log_level)
         progress.progress((idx + 1) / total, text="Поиск карточек...")
 
-    status_text.success("Поиск по списку завершен.")
+    progress_text.success("Поиск по списку завершен.")
 
 
 def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) -> None:
-    confirmed_items = [
-        item
-        for item in st.session_state.items
-        if item["status"] == "confirmed" and item["candidate"] is not None
-    ]
+    confirmed_items = get_confirmed_items()
 
     if not confirmed_items:
         st.warning("Нет подтвержденных карточек для сбора отзывов.")
@@ -180,15 +216,14 @@ def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) ->
 
     logger = build_logger(log_level)
     progress = st.progress(0, text="Подготовка к сбору отзывов...")
-    status_box = st.empty()
+    status_placeholder = st.empty()
     all_reviews: list[ReviewRecord] = []
-
     messages: list[str] = []
 
     def status_callback(message: str) -> None:
         messages.append(message)
         rendered = "\n".join(f"- {msg}" for msg in messages[-10:])
-        status_box.info(rendered)
+        status_placeholder.info(rendered)
 
     try:
         with YandexMapsScraper(
@@ -200,28 +235,31 @@ def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) ->
 
             for idx, item in enumerate(confirmed_items, start=1):
                 card = card_from_dict(item["candidate"])
+
                 progress.progress(
                     (idx - 1) / total,
-                    text=f"Сбор отзывов [{idx}/{total}]: {card.ymaps_card_name}",
+                    text=f"Сбор отзывов [{idx}/{total}]: {card.ymaps_card_name or card.ymaps_card_url}",
                 )
 
                 try:
                     reviews = scraper.collect_reviews(card=card, limit=limit)
                     all_reviews.extend(reviews)
                 except CaptchaRequiredError as exc:
-                    logger.warning("Капча не решена для '%s': %s", card.ymaps_card_name, exc)
+                    logger.warning("Капча по карточке '%s': %s", card.ymaps_card_name, exc)
                     st.warning(
-                        f"Карточка '{card.ymaps_card_name}' пропущена из-за капчи: {exc}"
+                        f"Карточка '{card.ymaps_card_name or card.ymaps_card_url}' "
+                        f"пропущена из-за капчи: {exc}"
                     )
                 except Exception as exc:
                     logger.exception("Ошибка при сборе отзывов по '%s'", card.ymaps_card_name)
                     st.warning(
-                        f"Ошибка при сборе отзывов по '{card.ymaps_card_name}': {exc}"
+                        f"Ошибка при сборе отзывов по "
+                        f"'{card.ymaps_card_name or card.ymaps_card_url}': {exc}"
                     )
 
                 progress.progress(
                     idx / total,
-                    text=f"Сбор отзывов [{idx}/{total}]: {card.ymaps_card_name}",
+                    text=f"Сбор отзывов [{idx}/{total}]: {card.ymaps_card_name or card.ymaps_card_url}",
                 )
 
     except Exception as exc:
@@ -229,47 +267,52 @@ def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) ->
         st.error(f"Критическая ошибка при сборе отзывов: {exc}")
         return
 
-    st.session_state.reviews = [asdict(review) for review in all_reviews]
-    st.session_state.stats = {
-        "complexes_total": len(st.session_state.items),
+    st.session_state[STATE_REVIEW_ROWS] = [asdict(review) for review in all_reviews]
+    st.session_state[STATE_RUN_STATS] = {
+        "complexes_total": len(get_search_items()),
         "cards_confirmed": len(confirmed_items),
         "reviews_total": len(all_reviews),
     }
-    status_box.success("Сбор отзывов завершен.")
+
+    status_placeholder.success("Сбор отзывов завершен.")
 
 
 def render_candidate(item: dict[str, Any]) -> None:
     candidate = item["candidate"]
+
     if candidate is None:
         st.info("Карточка пока не найдена.")
         return
 
     st.markdown("**Найденная карточка**")
-    st.write(f"**Исходный ЖК:** {candidate['residential_complex_input']}")
-    st.write(f"**Поисковый запрос:** {candidate['search_query']}")
-    st.write(f"**Название карточки:** {candidate['ymaps_card_name'] or '—'}")
-    st.write(f"**Адрес:** {candidate['ymaps_card_address'] or '—'}")
-    st.write(f"**URL:** {candidate['ymaps_card_url'] or '—'}")
+    st.write(f"**Исходный ЖК:** {candidate.get('residential_complex_input', '—')}")
+    st.write(f"**Поисковый запрос:** {candidate.get('search_query', '—')}")
+    st.write(f"**Название карточки:** {candidate.get('ymaps_card_name', '') or '—'}")
+    st.write(f"**Адрес:** {candidate.get('ymaps_card_address', '') or '—'}")
+    st.write(f"**URL:** {candidate.get('ymaps_card_url', '') or '—'}")
 
 
-def render_items(headless: bool, log_level: str) -> None:
-    if not st.session_state.items:
+def render_search_items(headless: bool, log_level: str) -> None:
+    search_items = get_search_items()
+
+    if not search_items:
         st.info("Список ЖК пока не загружен.")
         return
 
     st.subheader("Карточки для проверки")
 
-    for idx, item in enumerate(st.session_state.items):
-        title = f"{idx + 1}. {item['original_query']} — статус: {item['status']}"
-        expanded = item["status"] in {"pending"}
-        with st.expander(title, expanded=expanded):
-            search_key = f"search_query_{item['id']}"
-            if search_key not in st.session_state:
-                st.session_state[search_key] = item["search_query"]
+    for idx, item in enumerate(search_items):
+        expander_title = f"{idx + 1}. {item['original_query']} — статус: {item['status']}"
+        expanded = item["status"] == "pending"
+
+        with st.expander(expander_title, expanded=expanded):
+            query_state_key = f"search_query_{item['id']}"
+            if query_state_key not in st.session_state:
+                st.session_state[query_state_key] = item["search_query"]
 
             st.text_input(
                 "Поисковый запрос",
-                key=search_key,
+                key=query_state_key,
                 help="Можно изменить запрос и заново выполнить поиск.",
             )
 
@@ -280,17 +323,24 @@ def render_items(headless: bool, log_level: str) -> None:
                 st.rerun()
 
             if col2.button("Подтвердить карточку", key=f"confirm_btn_{item['id']}"):
-                if item["candidate"] is None:
+                latest_items = get_search_items()
+                latest_item = latest_items[idx]
+
+                if latest_item["candidate"] is None:
                     st.warning("Сначала выполните поиск и получите карточку.")
                 else:
-                    item["status"] = "confirmed"
-                    item["last_error"] = ""
-                    st.session_state.items[idx] = item
+                    latest_item["status"] = "confirmed"
+                    latest_item["last_error"] = ""
+                    latest_items[idx] = latest_item
+                    set_search_items(latest_items)
                     st.rerun()
 
             if col3.button("Исключить из списка", key=f"exclude_btn_{item['id']}"):
-                item["status"] = "excluded"
-                st.session_state.items[idx] = item
+                latest_items = get_search_items()
+                latest_item = latest_items[idx]
+                latest_item["status"] = "excluded"
+                latest_items[idx] = latest_item
+                set_search_items(latest_items)
                 st.rerun()
 
             if item["last_error"]:
@@ -300,19 +350,16 @@ def render_items(headless: bool, log_level: str) -> None:
 
 
 def render_confirmed_summary() -> None:
-    confirmed = [
-        item for item in st.session_state.items
-        if item["status"] == "confirmed" and item["candidate"] is not None
-    ]
+    confirmed_items = get_confirmed_items()
 
     st.subheader("Подтвержденные карточки")
 
-    if not confirmed:
+    if not confirmed_items:
         st.info("Пока нет подтвержденных карточек.")
         return
 
-    rows = []
-    for item in confirmed:
+    rows: list[dict[str, Any]] = []
+    for item in confirmed_items:
         candidate = item["candidate"]
         rows.append(
             {
@@ -326,24 +373,25 @@ def render_confirmed_summary() -> None:
     st.dataframe(rows, use_container_width=True)
 
 
-def render_reviews_result() -> None:
-    reviews_data = st.session_state.reviews
-    stats = st.session_state.stats
+def render_results() -> None:
+    review_rows = st.session_state[STATE_REVIEW_ROWS]
+    run_stats = st.session_state[STATE_RUN_STATS]
 
     st.subheader("Результат")
 
-    if stats:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("ЖК обработано", stats["complexes_total"])
-        c2.metric("Карточек подтверждено", stats["cards_confirmed"])
-        c3.metric("Отзывов собрано", stats["reviews_total"])
+    if run_stats:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("ЖК обработано", run_stats["complexes_total"])
+        col2.metric("Карточек подтверждено", run_stats["cards_confirmed"])
+        col3.metric("Отзывов собрано", run_stats["reviews_total"])
 
-    if not reviews_data:
+    if not review_rows:
         st.info("Отзывы пока не собраны.")
         return
 
+    review_objects = [review_from_dict(row) for row in review_rows]
+    csv_bytes = reviews_to_csv_bytes(review_objects)
     filename = f"ymaps_reviews_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    csv_bytes = reviews_to_csv_bytes([review_from_dict(item) for item in reviews_data])
 
     st.download_button(
         label="Скачать CSV",
@@ -352,15 +400,10 @@ def render_reviews_result() -> None:
         mime="text/csv",
     )
 
-    st.dataframe(reviews_data, use_container_width=True, height=500)
+    st.dataframe(review_rows, use_container_width=True, height=500)
 
 
-def main() -> None:
-    init_state()
-
-    st.title("🏙️ Сбор отзывов по ЖК конкурентов из Яндекс Карт")
-    st.caption("Streamlit + Playwright")
-
+def render_sidebar() -> tuple[bool, int, str]:
     with st.sidebar:
         st.header("Настройки")
 
@@ -391,22 +434,30 @@ def main() -> None:
         st.markdown(
             """
             **Рекомендация:**  
-            Запускайте локально и с выключенным headless, если возможна капча.
+            Если возможна капча, запускайте локально и с выключенным headless.
             """
         )
 
+    return headless, int(review_limit), log_level
+
+
+def render_input_section() -> None:
     st.subheader("Шаг 1. Загрузка списка ЖК")
 
-    input_col1, input_col2 = st.columns(2)
+    col1, col2 = st.columns(2)
 
-    with input_col1:
+    with col1:
         text_input = st.text_area(
             "Вставьте список ЖК построчно",
             height=220,
-            placeholder="ЖК Clever Park Екатеринбург\nЖК Макаровский Екатеринбург\nЖК Нагорный Екатеринбург",
+            placeholder=(
+                "ЖК Clever Park Екатеринбург\n"
+                "ЖК Макаровский Екатеринбург\n"
+                "ЖК Нагорный Екатеринбург"
+            ),
         )
 
-    with input_col2:
+    with col2:
         uploaded_file = st.file_uploader(
             "Или загрузите TXT-файл",
             type=["txt"],
@@ -414,10 +465,11 @@ def main() -> None:
         )
         uploaded_text = decode_uploaded_text_file(uploaded_file)
 
-    action_col1, action_col2 = st.columns([1, 1])
+    action_col1, action_col2 = st.columns(2)
 
     if action_col1.button("Загрузить список ЖК", type="primary"):
         queries = parse_queries(text_input=text_input, uploaded_text=uploaded_text)
+
         if not queries:
             st.warning("Не найдено ни одного валидного запроса.")
         else:
@@ -426,51 +478,63 @@ def main() -> None:
             st.rerun()
 
     if action_col2.button("Очистить текущий список"):
-        st.session_state.items = []
-        st.session_state.reviews = []
-        st.session_state.stats = None
+        clear_state()
         st.rerun()
 
-    if st.session_state.items:
-        top_col1, top_col2 = st.columns([1, 2])
-        if top_col1.button("Искать карточки для всех не исключенных ЖК"):
-            search_all_pending(headless=headless, log_level=log_level)
-            st.rerun()
 
-        pending_count = sum(1 for item in st.session_state.items if item["status"] == "pending")
-        confirmed_count = sum(1 for item in st.session_state.items if item["status"] == "confirmed")
-        excluded_count = sum(1 for item in st.session_state.items if item["status"] == "excluded")
+def render_top_actions(headless: bool, log_level: str) -> None:
+    search_items = get_search_items()
 
-        top_col2.info(
-            f"Всего: {len(st.session_state.items)} | "
-            f"Pending: {pending_count} | "
-            f"Confirmed: {confirmed_count} | "
-            f"Excluded: {excluded_count}"
-        )
+    if not search_items:
+        return
+
+    left_col, right_col = st.columns([1, 2])
+
+    if left_col.button("Искать карточки для всех не исключенных ЖК"):
+        search_all_non_excluded(headless=headless, log_level=log_level)
+        st.rerun()
+
+    pending_count = sum(1 for item in search_items if item["status"] == "pending")
+    confirmed_count = sum(1 for item in search_items if item["status"] == "confirmed")
+    excluded_count = sum(1 for item in search_items if item["status"] == "excluded")
+
+    right_col.info(
+        f"Всего: {len(search_items)} | "
+        f"Pending: {pending_count} | "
+        f"Confirmed: {confirmed_count} | "
+        f"Excluded: {excluded_count}"
+    )
+
+
+def main() -> None:
+    init_state()
+
+    st.title("🏙️ Сбор отзывов по ЖК конкурентов из Яндекс Карт")
+    st.caption("Streamlit + Playwright")
+
+    headless, review_limit, log_level = render_sidebar()
+
+    render_input_section()
+    render_top_actions(headless=headless, log_level=log_level)
 
     st.markdown("---")
-    render_items(headless=headless, log_level=log_level)
+    render_search_items(headless=headless, log_level=log_level)
 
     st.markdown("---")
     render_confirmed_summary()
 
-    confirmed_exists = any(
-        item["status"] == "confirmed" and item["candidate"] is not None
-        for item in st.session_state.items
-    )
-
-    if confirmed_exists:
+    if get_confirmed_items():
         st.subheader("Шаг 2. Сбор отзывов")
         if st.button("Собрать отзывы по подтвержденным карточкам", type="primary"):
             collect_reviews_for_confirmed(
                 headless=headless,
                 log_level=log_level,
-                limit=int(review_limit),
+                limit=review_limit,
             )
             st.rerun()
 
     st.markdown("---")
-    render_reviews_result()
+    render_results()
 
 
 if __name__ == "__main__":
