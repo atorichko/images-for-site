@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
@@ -25,6 +26,14 @@ st.set_page_config(
 STATE_SEARCH_ITEMS = "search_items"
 STATE_REVIEW_ROWS = "review_rows"
 STATE_RUN_STATS = "run_stats"
+
+
+def is_streamlit_cloud() -> bool:
+    cloud_markers = [
+        "STREAMLIT_SHARING_MODE",
+        "STREAMLIT_CLOUD",
+    ]
+    return any(os.environ.get(marker) for marker in cloud_markers)
 
 
 def init_state() -> None:
@@ -82,9 +91,7 @@ def load_queries_to_state(queries: list[str]) -> None:
 
 
 def clear_state() -> None:
-    search_items = get_search_items()
-
-    for item in search_items:
+    for item in get_search_items():
         key = f"search_query_{item['id']}"
         if key in st.session_state:
             del st.session_state[key]
@@ -174,8 +181,18 @@ def search_single_item(item_index: int, headless: bool, log_level: str) -> None:
             status_placeholder.success("Поиск завершен. Проверьте найденную карточку.")
 
     except CaptchaRequiredError as exc:
+        item["candidate"] = None
         item["last_error"] = str(exc)
         status_placeholder.error(str(exc))
+
+        if is_streamlit_cloud():
+            st.warning(
+                "Приложение запущено на Streamlit Cloud. "
+                "Если Яндекс показал капчу/антибот-проверку, "
+                "в облаке такой сценарий обычно не обрабатывается стабильно. "
+                "Для надежной работы лучше запускать приложение локально."
+            )
+
     except Exception as exc:
         logger.exception("Ошибка поиска карточки")
         item["last_error"] = str(exc)
@@ -248,7 +265,7 @@ def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) ->
                     logger.warning("Капча по карточке '%s': %s", card.ymaps_card_name, exc)
                     st.warning(
                         f"Карточка '{card.ymaps_card_name or card.ymaps_card_url}' "
-                        f"пропущена из-за капчи: {exc}"
+                        f"пропущена из-за капчи/антибота: {exc}"
                     )
                 except Exception as exc:
                     logger.exception("Ошибка при сборе отзывов по '%s'", card.ymaps_card_name)
@@ -403,18 +420,43 @@ def render_results() -> None:
     st.dataframe(review_rows, use_container_width=True, height=500)
 
 
+def render_environment_notice(cloud_mode: bool) -> None:
+    if cloud_mode:
+        st.warning(
+            "Приложение запущено на Streamlit Cloud. "
+            "Браузер работает только в headless-режиме. "
+            "Яндекс Карты могут показывать капчу или антибот-проверку, "
+            "а в облаке это часто делает сбор нестабильным."
+        )
+        st.info(
+            "Если поиск/сбор регулярно ломается, рекомендуется запускать это приложение локально."
+        )
+
+
 def render_sidebar() -> tuple[bool, int, str]:
+    cloud_mode = is_streamlit_cloud()
+
     with st.sidebar:
         st.header("Настройки")
 
-        headless = st.checkbox(
-            "Headless-режим",
-            value=False,
-            help=(
-                "Для локальной работы лучше выключить, чтобы видеть браузер "
-                "и при необходимости пройти капчу вручную."
-            ),
-        )
+        if cloud_mode:
+            headless = True
+            st.checkbox(
+                "Headless-режим",
+                value=True,
+                disabled=True,
+                help="На Streamlit Cloud headless включен принудительно.",
+            )
+            st.caption("На Streamlit Cloud headed-режим недоступен.")
+        else:
+            headless = st.checkbox(
+                "Headless-режим",
+                value=False,
+                help=(
+                    "Для локальной работы лучше выключить, чтобы видеть браузер "
+                    "и при необходимости пройти капчу вручную."
+                ),
+            )
 
         review_limit = st.number_input(
             "Лимит отзывов на карточку",
@@ -431,12 +473,22 @@ def render_sidebar() -> tuple[bool, int, str]:
         )
 
         st.markdown("---")
-        st.markdown(
-            """
-            **Рекомендация:**  
-            Если возможна капча, запускайте локально и с выключенным headless.
-            """
-        )
+
+        if cloud_mode:
+            st.markdown(
+                """
+                **Режим запуска:** Streamlit Cloud  
+                **Headless:** принудительно включен  
+                **Риск:** капча/антибот Яндекса
+                """
+            )
+        else:
+            st.markdown(
+                """
+                **Рекомендация:**  
+                Если возможна капча, запускайте локально и с выключенным headless.
+                """
+            )
 
     return headless, int(review_limit), log_level
 
@@ -509,9 +561,12 @@ def render_top_actions(headless: bool, log_level: str) -> None:
 def main() -> None:
     init_state()
 
+    cloud_mode = is_streamlit_cloud()
+
     st.title("🏙️ Сбор отзывов по ЖК конкурентов из Яндекс Карт")
     st.caption("Streamlit + Playwright")
 
+    render_environment_notice(cloud_mode)
     headless, review_limit, log_level = render_sidebar()
 
     render_input_section()
