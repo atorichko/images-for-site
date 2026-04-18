@@ -8,6 +8,10 @@ from typing import Any
 
 import streamlit as st
 
+st.sidebar.caption(
+    f"POLZA_AI_API_KEY на сервере: {'найден' if os.environ.get('POLZA_AI_API_KEY') else 'не найден'}"
+)
+
 from ai_analyzer import ReviewAIAnalyzer
 from config import DEFAULT_AI_MODEL, DEFAULT_MAX_REVIEWS
 from models import CardMatch, ReviewRecord
@@ -18,6 +22,8 @@ from utils import (
     setup_logging,
     unique_non_empty,
 )
+
+
 
 st.set_page_config(
     page_title="Yandex Maps ЖК Reviews Scraper",
