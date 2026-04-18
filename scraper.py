@@ -285,8 +285,9 @@ class YandexMapsScraper:
 
         collected: dict[tuple[str, str, str], ReviewRecord] = {}
         stagnant_iterations = 0
+        max_stagnant_iterations = min(MAX_SCROLL_STAGNATION, 2)
 
-        while len(collected) < limit and stagnant_iterations < MAX_SCROLL_STAGNATION:
+        while len(collected) < limit and stagnant_iterations < max_stagnant_iterations:
             self._maybe_handle_captcha(page)
             self._expand_visible_review_texts(page)
 
@@ -306,15 +307,26 @@ class YandexMapsScraper:
             if after_count >= limit:
                 break
 
-            scrolled = self._scroll_reviews(page)
-            sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+            if after_count == before_count:
+                stagnant_iterations += 1
+                self._emit_status(
+                    f"Новых отзывов не найдено: попытка "
+                    f"{stagnant_iterations}/{max_stagnant_iterations} "
+                    f"по '{card.ymaps_card_name or card.ymaps_card_url}'"
+                )
 
-            if after_count == before_count and not scrolled:
-                stagnant_iterations += 1
-            elif after_count == before_count:
-                stagnant_iterations += 1
+                if stagnant_iterations >= max_stagnant_iterations:
+                    self._emit_status(
+                        f"Останавливаем сбор по "
+                        f"'{card.ymaps_card_name or card.ymaps_card_url}': "
+                        f"2 подряд попытки не увеличили количество отзывов."
+                    )
+                    break
             else:
                 stagnant_iterations = 0
+
+            self._scroll_reviews(page)
+            sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
 
         result = list(collected.values())[:limit]
         self._emit_status(
