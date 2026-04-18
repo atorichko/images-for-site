@@ -184,3 +184,4 @@ def decode_uploaded_text_file(uploaded_file: BinaryIO | None) -> str:
             continue
 
     return raw.decode("utf-8", errors="ignore")
+ 
