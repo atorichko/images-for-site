@@ -8,7 +8,8 @@ from typing import Any
 
 import streamlit as st
 
-from config import DEFAULT_MAX_REVIEWS
+from ai_analyzer import ReviewAIAnalyzer
+from config import DEFAULT_AI_MODEL, DEFAULT_MAX_REVIEWS
 from models import CardMatch, ReviewRecord
 from scraper import CaptchaRequiredError, YandexMapsScraper
 from utils import (
@@ -106,6 +107,16 @@ def clear_state() -> None:
 def build_logger(log_level: str):
     return setup_logging(log_level)
 
+def get_default_polza_api_key() -> str:
+    env_key = os.environ.get("POLZA_AI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    try:
+        secret_key = str(st.secrets.get("POLZA_AI_API_KEY", "")).strip()
+        return secret_key
+    except Exception:
+        return ""
 
 def card_from_dict(data: dict[str, Any]) -> CardMatch:
     return CardMatch(
@@ -126,7 +137,11 @@ def review_from_dict(data: dict[str, Any]) -> ReviewRecord:
         review_date=data["review_date"],
         user_name=data["user_name"],
         review_text=data["review_text"],
+        ai_review_check=data.get("ai_review_check", ""),
+        ai_review_reason=data.get("ai_review_reason", ""),
+        ai_review_confidence=data.get("ai_review_confidence"),
     )
+
 
 
 def get_confirmed_items() -> list[dict[str, Any]]:
@@ -226,7 +241,14 @@ def search_all_non_excluded(headless: bool, log_level: str) -> None:
     progress_text.success("Поиск по списку завершен.")
 
 
-def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) -> None:
+def collect_reviews_for_confirmed(
+    headless: bool,
+    log_level: str,
+    limit: int,
+    analyze_with_ai: bool,
+    polza_api_key: str,
+    ai_model: str,
+) -> None:
     confirmed_items = get_confirmed_items()
 
     if not confirmed_items:
@@ -286,14 +308,54 @@ def collect_reviews_for_confirmed(headless: bool, log_level: str, limit: int) ->
         st.error(f"Критическая ошибка при сборе отзывов: {exc}")
         return
 
+    if analyze_with_ai and all_reviews:
+        if not polza_api_key.strip():
+            st.warning(
+                "AI-анализ включен, но ключ Polza.ai не указан. "
+                "Отзывы будут выгружены без AI-разметки."
+            )
+        else:
+            analyzer = ReviewAIAnalyzer(
+                api_key=polza_api_key.strip(),
+                model=ai_model.strip() or DEFAULT_AI_MODEL,
+                logger=logger,
+            )
+
+            analysis_progress = st.progress(0, text="AI-анализ отзывов...")
+
+            def ai_progress_callback(done: int, total: int, review: ReviewRecord) -> None:
+                title = review.ymaps_card_name or review.residential_complex_input or "—"
+                analysis_progress.progress(
+                    done / total,
+                    text=f"AI-анализ [{done}/{total}]: {title}",
+                )
+
+            try:
+                all_reviews = analyzer.analyze_reviews(
+                    all_reviews,
+                    progress_callback=ai_progress_callback,
+                )
+                status_placeholder.success("Сбор отзывов и AI-анализ завершены.")
+            except Exception as exc:
+                logger.exception("Ошибка AI-анализа отзывов")
+                st.warning(f"Отзывы собраны, но AI-анализ завершился ошибкой: {exc}")
+            finally:
+                analysis_progress.empty()
+    else:
+        status_placeholder.success("Сбор отзывов завершен.")
+
     st.session_state[STATE_REVIEW_ROWS] = [asdict(review) for review in all_reviews]
     st.session_state[STATE_RUN_STATS] = {
         "complexes_total": len(get_search_items()),
         "cards_confirmed": len(confirmed_items),
         "reviews_total": len(all_reviews),
+        "reviews_ai_checked": sum(
+            1 for review in all_reviews if review.ai_review_check and review.ai_review_check != "не определено"
+        ),
+        "reviews_suspicious": sum(
+            1 for review in all_reviews if review.ai_review_check in {"подозрительный", "искусственный"}
+        ),
     }
-
-    status_placeholder.success("Сбор отзывов завершен.")
 
 
 def render_candidate(item: dict[str, Any]) -> None:
@@ -399,10 +461,12 @@ def render_results() -> None:
     st.subheader("Результат")
 
     if run_stats:
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ЖК обработано", run_stats["complexes_total"])
         col2.metric("Карточек подтверждено", run_stats["cards_confirmed"])
         col3.metric("Отзывов собрано", run_stats["reviews_total"])
+        col4.metric("AI-проверено", run_stats.get("reviews_ai_checked", 0))
+        col5.metric("Подозрительных", run_stats.get("reviews_suspicious", 0))
 
     if not review_rows:
         st.info("Отзывы пока не собраны.")
@@ -423,6 +487,7 @@ def render_results() -> None:
 
 
 
+
 def render_environment_notice(cloud_mode: bool) -> None:
     if cloud_mode:
         st.warning(
@@ -436,7 +501,7 @@ def render_environment_notice(cloud_mode: bool) -> None:
         )
 
 
-def render_sidebar() -> tuple[bool, int, str]:
+def render_sidebar() -> tuple[bool, int, str, bool, str, str]:
     cloud_mode = is_streamlit_cloud()
 
     with st.sidebar:
@@ -468,7 +533,6 @@ def render_sidebar() -> tuple[bool, int, str]:
             value=DEFAULT_MAX_REVIEWS,
             step=1,
             help="Для снижения риска капчи лимит жестко ограничен 50 отзывами.",
-
         )
 
         log_level = st.selectbox(
@@ -478,13 +542,42 @@ def render_sidebar() -> tuple[bool, int, str]:
         )
 
         st.markdown("---")
+        st.subheader("AI-анализ отзывов")
+
+        if "polza_api_key_input" not in st.session_state:
+            st.session_state["polza_api_key_input"] = get_default_polza_api_key()
+
+        if "polza_ai_model_input" not in st.session_state:
+            st.session_state["polza_ai_model_input"] = DEFAULT_AI_MODEL
+
+        analyze_with_ai = st.checkbox(
+            "Проверять отзывы через Polza.ai",
+            value=True,
+            help="После сбора каждый отзыв будет размечен AI-моделью.",
+        )
+
+        ai_model = st.text_input(
+            "Модель Polza.ai",
+            key="polza_ai_model_input",
+            disabled=not analyze_with_ai,
+        )
+
+        polza_api_key = st.text_input(
+            "Polza.ai API key",
+            key="polza_api_key_input",
+            type="password",
+            disabled=not analyze_with_ai,
+            help="Рекомендуется хранить ключ в переменной окружения POLZA_AI_API_KEY или в st.secrets.",
+        )
+
+        st.markdown("---")
 
         if cloud_mode:
             st.markdown(
                 """
                 **Режим запуска:** Streamlit Cloud  
                 **Headless:** принудительно включен  
-                **Риск:** капча/антибот Яндекса
+                **Риск:** капча/антибот Яндекса  
                 **Рекомендация:**  
                 Для снижения риска капчи сбор ограничен последними 50 отзывами.
                 """
@@ -497,7 +590,7 @@ def render_sidebar() -> tuple[bool, int, str]:
                 """
             )
 
-    return headless, int(review_limit), log_level
+    return headless, int(review_limit), log_level, analyze_with_ai, polza_api_key, ai_model
 
 
 def render_input_section() -> None:
@@ -574,7 +667,7 @@ def main() -> None:
     st.caption("Streamlit + Playwright")
 
     render_environment_notice(cloud_mode)
-    headless, review_limit, log_level = render_sidebar()
+    headless, review_limit, log_level, analyze_with_ai, polza_api_key, ai_model = render_sidebar()
 
     render_input_section()
     render_top_actions(headless=headless, log_level=log_level)
@@ -587,11 +680,20 @@ def main() -> None:
 
     if get_confirmed_items():
         st.subheader("Шаг 2. Сбор отзывов")
-        if st.button("Собрать отзывы по подтвержденным карточкам", type="primary"):
+        button_label = (
+            "Собрать отзывы и выполнить AI-анализ"
+            if analyze_with_ai
+            else "Собрать отзывы по подтвержденным карточкам"
+        )
+
+        if st.button(button_label, type="primary"):
             collect_reviews_for_confirmed(
                 headless=headless,
                 log_level=log_level,
                 limit=review_limit,
+                analyze_with_ai=analyze_with_ai,
+                polza_api_key=polza_api_key,
+                ai_model=ai_model,
             )
             st.rerun()
 

@@ -102,6 +102,9 @@ def reviews_to_csv_bytes(records: list[ReviewRecord]) -> bytes:
         "review_date",
         "user_name",
         "review_text",
+        "ai_review_check",
+        "ai_review_reason",
+        "ai_review_confidence",
     ]
 
     writer = csv.DictWriter(buffer, fieldnames=fieldnames, delimiter=";")
@@ -126,6 +129,9 @@ def reviews_to_xlsx_bytes(records: list[ReviewRecord]) -> bytes:
         "review_date",
         "user_name",
         "review_text",
+        "ai_review_check",
+        "ai_review_reason",
+        "ai_review_confidence",
     ]
 
     worksheet.append(headers)
@@ -144,6 +150,9 @@ def reviews_to_xlsx_bytes(records: list[ReviewRecord]) -> bytes:
             row["review_date"],
             row["user_name"],
             row["review_text"],
+            row["ai_review_check"],
+            row["ai_review_reason"],
+            row["ai_review_confidence"],
         ])
 
     column_widths = {
@@ -154,6 +163,9 @@ def reviews_to_xlsx_bytes(records: list[ReviewRecord]) -> bytes:
         "E": 18,
         "F": 25,
         "G": 100,
+        "H": 22,
+        "I": 50,
+        "J": 16,
     }
 
     for col, width in column_widths.items():

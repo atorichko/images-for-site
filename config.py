@@ -145,3 +145,8 @@ REVIEW_SCROLL_CONTAINER_SELECTORS = [
     '[class*="scrollbar__container"]',
     '[class*="tabs-select-view__content"]',
 ]
+
+POLZA_AI_BASE_URL = "https://polza.ai/api/v1"
+DEFAULT_AI_MODEL = "gpt-4.1-mini"
+AI_ANALYSIS_REQUEST_TIMEOUT_SECONDS = 60
+AI_ANALYSIS_MAX_REVIEW_CHARS = 4000

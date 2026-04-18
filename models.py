@@ -21,3 +21,6 @@ class ReviewRecord:
     review_date: str
     user_name: str
     review_text: str
+    ai_review_check: str = ""
+    ai_review_reason: str = ""
+    ai_review_confidence: float | None = None
