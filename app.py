@@ -13,7 +13,7 @@ from models import CardMatch, ReviewRecord
 from scraper import CaptchaRequiredError, YandexMapsScraper
 from utils import (
     decode_uploaded_text_file,
-    reviews_to_csv_bytes,
+    reviews_to_xlsx_bytes,
     setup_logging,
     unique_non_empty,
 )
@@ -409,17 +409,18 @@ def render_results() -> None:
         return
 
     review_objects = [review_from_dict(row) for row in review_rows]
-    csv_bytes = reviews_to_csv_bytes(review_objects)
-    filename = f"ymaps_reviews_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    xlsx_bytes = reviews_to_xlsx_bytes(review_objects)
+    filename = f"ymaps_reviews_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     st.download_button(
-        label="Скачать CSV",
-        data=csv_bytes,
+        label="Скачать XLSX",
+        data=xlsx_bytes,
         file_name=filename,
-        mime="text/csv",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
     st.dataframe(review_rows, use_container_width=True, height=500)
+
 
 
 def render_environment_notice(cloud_mode: bool) -> None:
