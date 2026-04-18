@@ -507,7 +507,7 @@ def render_input_section() -> None:
 
     with col1:
         text_input = st.text_area(
-            "Вставьте список ЖК построчно",
+            "Вставьте список ЖК построчно в формате ""ЖК Название Город""",
             height=220,
             placeholder=(
                 "ЖК Clever Park Екатеринбург\n"
