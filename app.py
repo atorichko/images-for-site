@@ -501,7 +501,7 @@ def render_environment_notice(cloud_mode: bool) -> None:
         )
 
 
-def render_sidebar() -> tuple[bool, int, str, bool, str, str]:
+def render_sidebar() -> tuple[bool, int, str, bool, str]:
     cloud_mode = is_streamlit_cloud()
 
     with st.sidebar:
@@ -544,16 +544,17 @@ def render_sidebar() -> tuple[bool, int, str, bool, str, str]:
         st.markdown("---")
         st.subheader("AI-анализ отзывов")
 
-        if "polza_api_key_input" not in st.session_state:
-            st.session_state["polza_api_key_input"] = get_default_polza_api_key()
-
         if "polza_ai_model_input" not in st.session_state:
             st.session_state["polza_ai_model_input"] = DEFAULT_AI_MODEL
 
+        server_polza_api_key = get_default_polza_api_key()
+        server_key_configured = bool(server_polza_api_key)
+
         analyze_with_ai = st.checkbox(
             "Проверять отзывы через Polza.ai",
-            value=True,
-            help="После сбора каждый отзыв будет размечен AI-моделью.",
+            value=server_key_configured,
+            disabled=not server_key_configured,
+            help="Ключ берется с сервера, пользователю вводить его не нужно.",
         )
 
         ai_model = st.text_input(
@@ -562,13 +563,10 @@ def render_sidebar() -> tuple[bool, int, str, bool, str, str]:
             disabled=not analyze_with_ai,
         )
 
-        polza_api_key = st.text_input(
-            "Polza.ai API key",
-            key="polza_api_key_input",
-            type="password",
-            disabled=not analyze_with_ai,
-            help="Рекомендуется хранить ключ в переменной окружения POLZA_AI_API_KEY или в st.secrets.",
-        )
+        if server_key_configured:
+            st.success("Polza.ai API key загружен с сервера.")
+        else:
+            st.warning("Polza.ai API key не найден на сервере. AI-анализ недоступен.")
 
         st.markdown("---")
 
@@ -590,7 +588,8 @@ def render_sidebar() -> tuple[bool, int, str, bool, str, str]:
                 """
             )
 
-    return headless, int(review_limit), log_level, analyze_with_ai, polza_api_key, ai_model
+    return headless, int(review_limit), log_level, analyze_with_ai, ai_model
+
 
 
 def render_input_section() -> None:
@@ -667,7 +666,9 @@ def main() -> None:
     st.caption("Streamlit + Playwright")
 
     render_environment_notice(cloud_mode)
-    headless, review_limit, log_level, analyze_with_ai, polza_api_key, ai_model = render_sidebar()
+    headless, review_limit, log_level, analyze_with_ai, ai_model = render_sidebar()
+
+    polza_api_key = get_default_polza_api_key()
 
     render_input_section()
     render_top_actions(headless=headless, log_level=log_level)
