@@ -255,6 +255,53 @@ class YandexMapsScraper:
             ymaps_card_url=card_url,
         )
 
+    def get_card_by_url(
+        self,
+        *,
+        residential_complex_input: str,
+        search_query: str,
+        card_url: str,
+    ) -> CardMatch | None:
+        page = self._require_page()
+
+        raw_url = normalize_whitespace(card_url)
+        if not raw_url:
+            return None
+
+        normalized_org_url = self._normalize_org_url(raw_url)
+        target_url = normalized_org_url or raw_url
+
+        if not re.match(r"^https?://", target_url, flags=re.IGNORECASE):
+            target_url = f"https://{target_url.lstrip('/')}"
+
+        if "yandex." not in target_url:
+            raise ValueError("Укажите URL карточки Яндекс Карт.")
+
+        self._emit_status(f"Открытие карточки по URL: {target_url}")
+        self._goto(target_url)
+        self._maybe_handle_captcha(page)
+        self._wait_for_card(page)
+        sleep_random(1.5, 3.0)
+
+        title = self._extract_text_from_selectors(page, CARD_TITLE_SELECTORS)
+        address = self._extract_text_from_selectors(page, CARD_ADDRESS_SELECTORS)
+        resolved_card_url = self._extract_card_url(page) or normalized_org_url or self._normalize_fallback_url(target_url)
+
+        if not title and not resolved_card_url:
+            self.logger.warning("Не удалось распознать карточку по URL: %s", card_url)
+            return None
+
+        self._emit_status(f"Карточка по URL открыта: {title or resolved_card_url}")
+
+        return CardMatch(
+            residential_complex_input=residential_complex_input,
+            search_query=search_query,
+            ymaps_card_name=title,
+            ymaps_card_address=address,
+            ymaps_card_url=resolved_card_url,
+        )
+
+
     def collect_reviews(
         self,
         *,

@@ -99,14 +99,20 @@ def load_queries_to_state(queries: list[str]) -> None:
 
     for item in search_items:
         state_key = f"search_query_{item['id']}"
+        manual_url_key = f"manual_url_{item['id']}"
         st.session_state[state_key] = item["search_query"]
-
+        st.session_state[manual_url_key] = ""
 
 def clear_state() -> None:
     for item in get_search_items():
         key = f"search_query_{item['id']}"
+        manual_url_key = f"manual_url_{item['id']}"
+
         if key in st.session_state:
             del st.session_state[key]
+
+        if manual_url_key in st.session_state:
+            del st.session_state[manual_url_key]
 
     st.session_state[STATE_SEARCH_ITEMS] = []
     st.session_state[STATE_REVIEW_ROWS] = []
@@ -256,6 +262,74 @@ def search_single_item(item_index: int, headless: bool, log_level: str) -> None:
         logger.exception("Ошибка поиска карточки")
         item["last_error"] = str(exc)
         status_placeholder.error(f"Ошибка поиска: {exc}")
+
+    search_items[item_index] = item
+    set_search_items(search_items)
+
+def confirm_item_by_manual_url(item_index: int, headless: bool, log_level: str) -> None:
+    search_items = get_search_items()
+    item = search_items[item_index]
+    item_id = item["id"]
+
+    query_state_key = f"search_query_{item_id}"
+    manual_url_key = f"manual_url_{item_id}"
+
+    item["search_query"] = st.session_state.get(query_state_key, item["search_query"]).strip()
+    manual_url = normalize_whitespace(st.session_state.get(manual_url_key, ""))
+
+    if not manual_url:
+        item["last_error"] = "Введите URL карточки Яндекс Карт."
+        search_items[item_index] = item
+        set_search_items(search_items)
+        return
+
+    logger = build_logger(log_level)
+    status_placeholder = st.empty()
+    messages: list[str] = []
+
+    def status_callback(message: str) -> None:
+        messages.append(message)
+        rendered = "\n".join(f"- {msg}" for msg in messages[-8:])
+        status_placeholder.info(rendered)
+
+    try:
+        with YandexMapsScraper(
+            headless=headless,
+            logger=logger,
+            status_callback=status_callback,
+        ) as scraper:
+            candidate = scraper.get_card_by_url(
+                residential_complex_input=item["original_query"],
+                search_query=item["search_query"],
+                card_url=manual_url,
+            )
+
+        if candidate is None:
+            item["last_error"] = "Не удалось открыть карточку по указанному URL."
+            status_placeholder.warning(item["last_error"])
+        else:
+            item["candidate"] = asdict(candidate)
+            item["status"] = "confirmed"
+            item["last_error"] = ""
+            st.session_state[manual_url_key] = candidate.ymaps_card_url or manual_url
+            status_placeholder.success("Карточка загружена по URL и автоматически подтверждена.")
+
+    except CaptchaRequiredError as exc:
+        item["last_error"] = str(exc)
+        status_placeholder.error(str(exc))
+
+        if is_streamlit_cloud():
+            st.warning(
+                "Приложение запущено на Streamlit Cloud. "
+                "Если Яндекс показал капчу/антибот-проверку, "
+                "в облаке такой сценарий обычно не обрабатывается стабильно. "
+                "Для надежной работы лучше запускать приложение локально."
+            )
+
+    except Exception as exc:
+        logger.exception("Ошибка подтверждения карточки по URL")
+        item["last_error"] = str(exc)
+        status_placeholder.error(f"Ошибка подтверждения по URL: {exc}")
 
     search_items[item_index] = item
     set_search_items(search_items)
@@ -460,8 +534,13 @@ def render_search_items(headless: bool, log_level: str) -> None:
 
         with st.expander(expander_title, expanded=expanded):
             query_state_key = f"search_query_{item['id']}"
+            manual_url_key = f"manual_url_{item['id']}"
+
             if query_state_key not in st.session_state:
                 st.session_state[query_state_key] = item["search_query"]
+
+            if manual_url_key not in st.session_state:
+                st.session_state[manual_url_key] = ""
 
             st.text_input(
                 "Поисковый запрос",
@@ -469,18 +548,32 @@ def render_search_items(headless: bool, log_level: str) -> None:
                 help="Можно изменить запрос и заново выполнить поиск.",
             )
 
-            col1, col2, col3 = st.columns(3)
+            st.text_input(
+                "Ввести URL карточки вручную",
+                key=manual_url_key,
+                placeholder="https://yandex.ru/maps/org/...",
+                help=(
+                    "Если карточка уже известна, вставьте URL Яндекс Карт и нажмите "
+                    "«Подтвердить по URL». Карточка будет автоматически подтверждена."
+                ),
+            )
+
+            col1, col2, col3, col4 = st.columns(4)
 
             if col1.button("Найти / повторить поиск", key=f"search_btn_{item['id']}"):
                 search_single_item(idx, headless=headless, log_level=log_level)
                 st.rerun()
 
-            if col2.button("Подтвердить карточку", key=f"confirm_btn_{item['id']}"):
+            if col2.button("Подтвердить по URL", key=f"manual_confirm_btn_{item['id']}"):
+                confirm_item_by_manual_url(idx, headless=headless, log_level=log_level)
+                st.rerun()
+
+            if col3.button("Подтвердить карточку", key=f"confirm_btn_{item['id']}"):
                 latest_items = get_search_items()
                 latest_item = latest_items[idx]
 
                 if latest_item["candidate"] is None:
-                    st.warning("Сначала выполните поиск и получите карточку.")
+                    st.warning("Сначала выполните поиск, получите карточку или вставьте URL.")
                 else:
                     latest_item["status"] = "confirmed"
                     latest_item["last_error"] = ""
@@ -488,7 +581,7 @@ def render_search_items(headless: bool, log_level: str) -> None:
                     set_search_items(latest_items)
                     st.rerun()
 
-            if col3.button("Исключить из списка", key=f"exclude_btn_{item['id']}"):
+            if col4.button("Исключить из списка", key=f"exclude_btn_{item['id']}"):
                 latest_items = get_search_items()
                 latest_item = latest_items[idx]
                 latest_item["status"] = "excluded"
@@ -500,8 +593,7 @@ def render_search_items(headless: bool, log_level: str) -> None:
                 st.error(item["last_error"])
 
             render_candidate(item)
-
-
+            
 def render_confirmed_summary() -> None:
     confirmed_items = get_confirmed_items()
 
