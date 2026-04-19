@@ -8,6 +8,12 @@ from typing import Any
 
 import streamlit as st
 
+st.set_page_config(
+    page_title="Yandex Maps ЖК Reviews Scraper",
+    page_icon="🏙️",
+    layout="wide",
+)
+
 st.sidebar.caption(
     f"POLZA_AI_API_KEY на сервере: {'найден' if os.environ.get('POLZA_AI_API_KEY') else 'не найден'}"
 )
@@ -18,22 +24,16 @@ from models import CardMatch, ReviewRecord
 from scraper import CaptchaRequiredError, YandexMapsScraper
 from utils import (
     decode_uploaded_text_file,
+    normalize_whitespace,
     reviews_to_xlsx_bytes,
     setup_logging,
     unique_non_empty,
 )
 
-
-
-st.set_page_config(
-    page_title="Yandex Maps ЖК Reviews Scraper",
-    page_icon="🏙️",
-    layout="wide",
-)
-
 STATE_SEARCH_ITEMS = "search_items"
 STATE_REVIEW_ROWS = "review_rows"
 STATE_RUN_STATS = "run_stats"
+STATE_COMPANY_SUMMARIES = "company_summaries"
 
 
 def is_streamlit_cloud() -> bool:
@@ -50,6 +50,7 @@ def init_state() -> None:
         STATE_SEARCH_ITEMS: [],
         STATE_REVIEW_ROWS: [],
         STATE_RUN_STATS: None,
+        STATE_COMPANY_SUMMARIES: [],
     }
 
     for key, value in defaults.items():
@@ -93,6 +94,7 @@ def load_queries_to_state(queries: list[str]) -> None:
     set_search_items(search_items)
     st.session_state[STATE_REVIEW_ROWS] = []
     st.session_state[STATE_RUN_STATS] = None
+    st.session_state[STATE_COMPANY_SUMMARIES] = []
 
     for item in search_items:
         state_key = f"search_query_{item['id']}"
@@ -108,10 +110,12 @@ def clear_state() -> None:
     st.session_state[STATE_SEARCH_ITEMS] = []
     st.session_state[STATE_REVIEW_ROWS] = []
     st.session_state[STATE_RUN_STATS] = None
+    st.session_state[STATE_COMPANY_SUMMARIES] = []
 
 
 def build_logger(log_level: str):
     return setup_logging(log_level)
+
 
 def get_default_polza_api_key() -> str:
     env_key = os.environ.get("POLZA_AI_API_KEY", "").strip()
@@ -123,6 +127,7 @@ def get_default_polza_api_key() -> str:
         return secret_key
     except Exception:
         return ""
+
 
 def card_from_dict(data: dict[str, Any]) -> CardMatch:
     return CardMatch(
@@ -149,13 +154,43 @@ def review_from_dict(data: dict[str, Any]) -> ReviewRecord:
     )
 
 
-
 def get_confirmed_items() -> list[dict[str, Any]]:
     return [
         item
         for item in get_search_items()
         if item["status"] == "confirmed" and item["candidate"] is not None
     ]
+
+
+def make_company_key(
+    residential_complex_input: str,
+    ymaps_card_name: str,
+    ymaps_card_address: str,
+    ymaps_card_url: str,
+) -> str:
+    return "||".join(
+        [
+            normalize_whitespace(residential_complex_input).lower(),
+            normalize_whitespace(ymaps_card_name).lower(),
+            normalize_whitespace(ymaps_card_address).lower(),
+            normalize_whitespace(ymaps_card_url).lower(),
+        ]
+    )
+
+
+def group_review_rows_by_company(review_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    for row in review_rows:
+        key = make_company_key(
+            row.get("residential_complex_input", ""),
+            row.get("ymaps_card_name", ""),
+            row.get("ymaps_card_address", ""),
+            row.get("ymaps_card_url", ""),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    return grouped
 
 
 def search_single_item(item_index: int, headless: bool, log_level: str) -> None:
@@ -265,6 +300,7 @@ def collect_reviews_for_confirmed(
     progress = st.progress(0, text="Подготовка к сбору отзывов...")
     status_placeholder = st.empty()
     all_reviews: list[ReviewRecord] = []
+    company_summaries: list[dict[str, Any]] = []
     messages: list[str] = []
 
     def status_callback(message: str) -> None:
@@ -341,16 +377,38 @@ def collect_reviews_for_confirmed(
                     all_reviews,
                     progress_callback=ai_progress_callback,
                 )
-                status_placeholder.success("Сбор отзывов и AI-анализ завершены.")
             except Exception as exc:
                 logger.exception("Ошибка AI-анализа отзывов")
                 st.warning(f"Отзывы собраны, но AI-анализ завершился ошибкой: {exc}")
             finally:
                 analysis_progress.empty()
+
+            summary_progress = st.progress(0, text="AI-сводка по компаниям...")
+
+            def summary_progress_callback(done: int, total: int, summary: Any) -> None:
+                title = summary.ymaps_card_name or summary.residential_complex_input or "—"
+                summary_progress.progress(
+                    done / total,
+                    text=f"AI-сводка [{done}/{total}]: {title}",
+                )
+
+            try:
+                summaries = analyzer.summarize_companies(
+                    all_reviews,
+                    progress_callback=summary_progress_callback,
+                )
+                company_summaries = [asdict(summary) for summary in summaries]
+                status_placeholder.success("Сбор отзывов, AI-анализ и сводки по компаниям завершены.")
+            except Exception as exc:
+                logger.exception("Ошибка AI-сводки по компаниям")
+                st.warning(f"Отзывы собраны и размечены, но сводка по компаниям завершилась ошибкой: {exc}")
+            finally:
+                summary_progress.empty()
     else:
         status_placeholder.success("Сбор отзывов завершен.")
 
     st.session_state[STATE_REVIEW_ROWS] = [asdict(review) for review in all_reviews]
+    st.session_state[STATE_COMPANY_SUMMARIES] = company_summaries
     st.session_state[STATE_RUN_STATS] = {
         "complexes_total": len(get_search_items()),
         "cards_confirmed": len(confirmed_items),
@@ -361,6 +419,7 @@ def collect_reviews_for_confirmed(
         "reviews_suspicious": sum(
             1 for review in all_reviews if review.ai_review_check in {"подозрительный", "искусственный"}
         ),
+        "companies_ai_summarized": len(company_summaries),
     }
 
 
@@ -460,23 +519,91 @@ def render_confirmed_summary() -> None:
     st.dataframe(rows, use_container_width=True)
 
 
+def render_company_summaries(review_rows: list[dict[str, Any]], company_summaries: list[dict[str, Any]]) -> None:
+    if not company_summaries:
+        return
+
+    st.subheader("AI-вывод по компаниям")
+
+    grouped_reviews = group_review_rows_by_company(review_rows)
+
+    for idx, summary in enumerate(company_summaries, start=1):
+        title = summary.get("ymaps_card_name") or summary.get("residential_complex_input") or f"Компания {idx}"
+        address = summary.get("ymaps_card_address") or "—"
+        url = summary.get("ymaps_card_url") or "—"
+
+        st.markdown(f"### {idx}. {title}")
+        st.write(f"**Адрес:** {address}")
+        st.write(f"**URL:** {url}")
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Всего отзывов", summary.get("total_reviews", 0))
+        col2.metric("Естественных", summary.get("natural_reviews", 0))
+        col3.metric("Подозрительных", summary.get("suspicious_reviews", 0))
+        col4.metric("Искусственных", summary.get("artificial_reviews", 0))
+        col5.metric("В сводке использовано", summary.get("source_reviews_used", 0))
+
+        positives = summary.get("positives", []) or []
+        negatives = summary.get("negatives", []) or []
+        conclusion = summary.get("conclusion", "") or ""
+
+        left_col, right_col = st.columns(2)
+
+        with left_col:
+            st.markdown("**Что положительного отмечают покупатели**")
+            if positives:
+                for item in positives:
+                    st.markdown(f"- {item}")
+            else:
+                st.info("Явно повторяющиеся положительные темы не выделены.")
+
+        with right_col:
+            st.markdown("**Что отрицательного отмечают покупатели**")
+            if negatives:
+                for item in negatives:
+                    st.markdown(f"- {item}")
+            else:
+                st.info("Явно повторяющиеся отрицательные темы не выделены.")
+
+        if conclusion:
+            st.markdown("**Краткий вывод**")
+            st.write(conclusion)
+
+        company_key = make_company_key(
+            summary.get("residential_complex_input", ""),
+            summary.get("ymaps_card_name", ""),
+            summary.get("ymaps_card_address", ""),
+            summary.get("ymaps_card_url", ""),
+        )
+        related_reviews = grouped_reviews.get(company_key, [])
+
+        with st.expander(f"Показать отзывы компании ({len(related_reviews)})", expanded=False):
+            st.dataframe(related_reviews, use_container_width=True, height=260)
+
+        st.markdown("---")
+
+
 def render_results() -> None:
     review_rows = st.session_state[STATE_REVIEW_ROWS]
     run_stats = st.session_state[STATE_RUN_STATS]
+    company_summaries = st.session_state[STATE_COMPANY_SUMMARIES]
 
     st.subheader("Результат")
 
     if run_stats:
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("ЖК обработано", run_stats["complexes_total"])
         col2.metric("Карточек подтверждено", run_stats["cards_confirmed"])
         col3.metric("Отзывов собрано", run_stats["reviews_total"])
         col4.metric("AI-проверено", run_stats.get("reviews_ai_checked", 0))
         col5.metric("Подозрительных", run_stats.get("reviews_suspicious", 0))
+        col6.metric("Компаний со сводкой", run_stats.get("companies_ai_summarized", 0))
 
     if not review_rows:
         st.info("Отзывы пока не собраны.")
         return
+
+    render_company_summaries(review_rows, company_summaries)
 
     review_objects = [review_from_dict(row) for row in review_rows]
     xlsx_bytes = reviews_to_xlsx_bytes(review_objects)
@@ -489,9 +616,8 @@ def render_results() -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    st.markdown("### Все собранные отзывы")
     st.dataframe(review_rows, use_container_width=True, height=500)
-
-
 
 
 def render_environment_notice(cloud_mode: bool) -> None:
@@ -595,7 +721,6 @@ def render_sidebar() -> tuple[bool, int, str, bool, str]:
             )
 
     return headless, int(review_limit), log_level, analyze_with_ai, ai_model
-
 
 
 def render_input_section() -> None:
