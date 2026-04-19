@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import Any
@@ -196,7 +197,7 @@ class ReviewAIAnalyzer:
         self,
         reviews: list[ReviewRecord],
         *,
-        progress_callback=None,
+        progress_callback: Callable[[int, int, ReviewRecord], None] | None = None,
     ) -> list[ReviewRecord]:
         total = len(reviews)
         result_rows: list[ReviewRecord | None] = [None] * total
@@ -295,7 +296,7 @@ class ReviewAIAnalyzer:
         self,
         reviews: list[ReviewRecord],
         *,
-        progress_callback=None,
+        progress_callback: Callable[[int, int, CompanyReviewSummary], None] | None = None,
     ) -> list[CompanyReviewSummary]:
         grouped: dict[tuple[str, str, str, str], list[ReviewRecord]] = {}
 
@@ -465,7 +466,7 @@ class ReviewAIAnalyzer:
                 conclusion="Недостаточно текстов для формирования сводки.",
             )
 
-        payload_items = []
+        payload_items: list[dict[str, str]] = []
         total_chars = 0
 
         for idx, review in enumerate(selected_reviews, start=1):

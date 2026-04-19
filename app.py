@@ -27,6 +27,7 @@ from utils import (
     normalize_whitespace,
     reviews_to_xlsx_bytes,
     setup_logging,
+    sleep_random,
     unique_non_empty,
 )
 
@@ -344,6 +345,12 @@ def collect_reviews_for_confirmed(
                     idx / total,
                     text=f"Сбор отзывов [{idx}/{total}]: {card.ymaps_card_name or card.ymaps_card_url}",
                 )
+
+                if idx < total:
+                    status_callback(
+                        "Пауза перед следующей карточкой для снижения риска капчи Яндекса..."
+                    )
+                    sleep_random(5.0, 12.0)
 
     except Exception as exc:
         logger.exception("Критическая ошибка при сборе отзывов")
@@ -723,7 +730,7 @@ def render_sidebar() -> tuple[bool, int, str, bool, str]:
             st.markdown(
                 """
                 **Рекомендация:**  
-                Если возможна капча, запускайте локально и с выключенным headless.
+                Для снижения риска капчи запускайте локально и с выключенным headless.
                 """
             )
 

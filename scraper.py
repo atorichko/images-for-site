@@ -235,6 +235,7 @@ class YandexMapsScraper:
 
         self._maybe_handle_captcha(page)
         self._wait_for_card(page)
+        sleep_random(1.5, 3.0)
 
         title = self._extract_text_from_selectors(page, CARD_TITLE_SELECTORS)
         address = self._extract_text_from_selectors(page, CARD_ADDRESS_SELECTORS)
@@ -268,19 +269,33 @@ class YandexMapsScraper:
             self.logger.warning("У карточки отсутствует URL, пропуск")
             return []
 
+        normalized_card_url = self._normalize_org_url(card.ymaps_card_url) or card.ymaps_card_url
         reviews_url = self._build_reviews_url(card.ymaps_card_url)
-        self._emit_status(f"Открытие страницы отзывов: {reviews_url}")
 
-        self._goto(reviews_url)
+        self._emit_status(f"Открытие карточки: {normalized_card_url}")
+        self._goto(normalized_card_url)
         self._maybe_handle_captcha(page)
-        self._wait_for_reviews_page(page)
+        self._wait_for_card(page)
+        sleep_random(2.0, 4.0)
 
-        if not self._open_reviews_section(page):
+        reviews_opened = self._open_reviews_section(page)
+
+        if not reviews_opened:
             self._emit_status(
-                f"Отзывы не найдены на странице: {card.ymaps_card_name or card.ymaps_card_url}"
+                f"Не удалось открыть отзывы из карточки. Открытие страницы отзывов: {reviews_url}"
             )
-            return []
+            self._goto(reviews_url)
+            self._maybe_handle_captcha(page)
+            self._wait_for_reviews_page(page)
+            sleep_random(2.0, 4.0)
 
+            if not self._open_reviews_section(page):
+                self._emit_status(
+                    f"Отзывы не найдены на странице: {card.ymaps_card_name or card.ymaps_card_url}"
+                )
+                return []
+
+        sleep_random(1.5, 3.0)
         self._sort_reviews_by_newest(page)
 
         collected: dict[tuple[str, str, str], ReviewRecord] = {}
@@ -466,6 +481,7 @@ class YandexMapsScraper:
                 try:
                     if not item.is_visible():
                         continue
+                    sleep_random(0.6, 1.4)
                     item.click(timeout=5_000)
                     sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
                     return True
@@ -493,6 +509,7 @@ class YandexMapsScraper:
                 try:
                     if not item.is_visible():
                         continue
+                    sleep_random(0.6, 1.4)
                     item.click(timeout=5_000)
                     sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
                     if self._find_first_visible(page, REVIEW_ITEM_SELECTORS, timeout_ms=5_000) is not None:
@@ -511,6 +528,7 @@ class YandexMapsScraper:
         newest_visible = self._find_first_visible(page, NEWEST_OPTION_SELECTORS, timeout_ms=1_000)
         if newest_visible is not None:
             try:
+                sleep_random(0.6, 1.2)
                 newest_visible.click(timeout=2_000)
                 sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
                 return
@@ -523,6 +541,7 @@ class YandexMapsScraper:
             return
 
         try:
+            sleep_random(0.6, 1.2)
             sort_button.click(timeout=3_000)
             sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
 
@@ -531,6 +550,7 @@ class YandexMapsScraper:
                 self.logger.warning("Не найден пункт 'Сначала новые'")
                 return
 
+            sleep_random(0.6, 1.2)
             newest_option.click(timeout=3_000)
             sleep_random(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
         except PlaywrightError as exc:
@@ -590,8 +610,9 @@ class YandexMapsScraper:
                 item = locator.nth(idx)
                 try:
                     if item.is_visible():
+                        sleep_random(0.2, 0.6)
                         item.click(timeout=1_000)
-                        time.sleep(0.1)
+                        time.sleep(0.15)
                 except PlaywrightError:
                     continue
 
@@ -606,12 +627,12 @@ class YandexMapsScraper:
                 container.evaluate(
                     """
                     (el) => {
-                        const step = Math.max(1000, el.clientHeight * 1.1);
+                        const step = Math.max(900, el.clientHeight * 0.95);
                         el.scrollBy(0, step);
                     }
                     """
                 )
-                time.sleep(0.7)
+                sleep_random(1.0, 1.8)
 
                 after_top = container.evaluate("(el) => el.scrollTop")
                 after_height = container.evaluate("(el) => el.scrollHeight")
@@ -638,7 +659,7 @@ class YandexMapsScraper:
                 """
                 () => {
                     const el = document.scrollingElement || document.documentElement || document.body;
-                    const step = Math.max(1200, window.innerHeight * 1.3);
+                    const step = Math.max(1000, window.innerHeight * 1.1);
 
                     window.scrollBy(0, step);
 
@@ -648,7 +669,7 @@ class YandexMapsScraper:
                 }
                 """
             )
-            time.sleep(0.7)
+            sleep_random(1.0, 1.8)
 
             after = page.evaluate(
                 """
