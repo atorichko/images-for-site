@@ -36,7 +36,9 @@ class CompanyReviewSummary:
     natural_reviews: int = 0
     suspicious_reviews: int = 0
     artificial_reviews: int = 0
+    summary_input_reviews: int = 0
     source_reviews_used: int = 0
+    neighbor_reviews_excluded: int = 0
     positives: list[str] = field(default_factory=list)
     negatives: list[str] = field(default_factory=list)
     conclusion: str = ""

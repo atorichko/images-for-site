@@ -536,12 +536,14 @@ def render_company_summaries(review_rows: list[dict[str, Any]], company_summarie
         st.write(f"**Адрес:** {address}")
         st.write(f"**URL:** {url}")
 
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
         col1.metric("Всего отзывов", summary.get("total_reviews", 0))
         col2.metric("Естественных", summary.get("natural_reviews", 0))
         col3.metric("Подозрительных", summary.get("suspicious_reviews", 0))
         col4.metric("Искусственных", summary.get("artificial_reviews", 0))
-        col5.metric("В сводке использовано", summary.get("source_reviews_used", 0))
+        col5.metric("Отобрано в summary", summary.get("summary_input_reviews", 0))
+        col6.metric("Учтено покупательских", summary.get("source_reviews_used", 0))
+        col7.metric("Исключено соседских", summary.get("neighbor_reviews_excluded", 0))
 
         positives = summary.get("positives", []) or []
         negatives = summary.get("negatives", []) or []
@@ -568,6 +570,11 @@ def render_company_summaries(review_rows: list[dict[str, Any]], company_summarie
         if conclusion:
             st.markdown("**Краткий вывод**")
             st.write(conclusion)
+
+        st.caption(
+            "В итоговом выводе учитываются только отзывы, похожие на отзывы покупателей/клиентов. "
+            "Соседские жалобы на шум, пыль, стройку и похожие темы исключаются."
+        )
 
         company_key = make_company_key(
             summary.get("residential_complex_input", ""),
@@ -730,7 +737,7 @@ def render_input_section() -> None:
 
     with col1:
         text_input = st.text_area(
-            "Вставьте список ЖК построчно в формате ""ЖК Название Город""",
+            'Вставьте список ЖК построчно в формате "ЖК Название Город"',
             height=220,
             placeholder=(
                 "ЖК Clever Park Екатеринбург\n"
