@@ -564,7 +564,7 @@ def render_search_items(headless: bool, log_level: str) -> None:
                 search_single_item(idx, headless=headless, log_level=log_level)
                 st.rerun()
 
-            if col2.button("Подтвердить по URL", key=f"manual_confirm_btn_{item['id']}"):
+            if col2.button("Ввести URL вручную", key=f"manual_confirm_btn_{item['id']}"):
                 confirm_item_by_manual_url(idx, headless=headless, log_level=log_level)
                 st.rerun()
 
