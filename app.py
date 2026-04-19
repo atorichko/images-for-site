@@ -311,7 +311,6 @@ def confirm_item_by_manual_url(item_index: int, headless: bool, log_level: str) 
             item["candidate"] = asdict(candidate)
             item["status"] = "confirmed"
             item["last_error"] = ""
-            st.session_state[manual_url_key] = candidate.ymaps_card_url or manual_url
             status_placeholder.success("Карточка загружена по URL и автоматически подтверждена.")
 
     except CaptchaRequiredError as exc:
@@ -564,7 +563,7 @@ def render_search_items(headless: bool, log_level: str) -> None:
                 search_single_item(idx, headless=headless, log_level=log_level)
                 st.rerun()
 
-            if col2.button("Ввести URL вручную", key=f"manual_confirm_btn_{item['id']}"):
+            if col2.button("Ввести URL", key=f"manual_confirm_btn_{item['id']}"):
                 confirm_item_by_manual_url(idx, headless=headless, log_level=log_level)
                 st.rerun()
 
